@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Training and evaluation artifacts
+checkpoints/
+outputs/
+outputs_*/
+outputs_retest/
+results/
+results_m/
+runtime/
+logs/
+runs/
+*.ckpt
+*.pth
+*.pt
+*.ply
+*.pfm
+*.mat
+*.log
+events.out.tfevents.*
+
+# Local backups
+*.bak
+*.bak_*
+*~
+
+# System/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
