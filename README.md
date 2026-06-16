@@ -15,6 +15,10 @@ The current research branch adds two reliability-driven components:
 
 When both are enabled, RAFE reliability maps are homography-warped together with source features and are consumed by SP-RWCV while computing source-view weights.
 
+## Evaluation
+
+DTU metrics are distance errors, so lower is better. Current baseline and SP-RWCV evaluation summaries are tracked in [docs/evaluation_results.md](docs/evaluation_results.md), with raw CSV files in [docs/results](docs/results).
+
 ## Main Flags
 
 Train plain baseline:

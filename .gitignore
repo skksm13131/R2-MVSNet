@@ -12,6 +12,8 @@ outputs_*/
 outputs_retest/
 results/
 results_m/
+!docs/results/
+!docs/results/*.csv
 runtime/
 logs/
 runs/
