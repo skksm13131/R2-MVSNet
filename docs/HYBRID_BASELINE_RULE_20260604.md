@@ -1,33 +1,36 @@
-# 2026-06-04 Hybrid Baseline ??
+# Hybrid Baseline Rule 2026-06-04
 
-?????????
+## Why This Exists
 
-- `models/` ????? baseline?`/home/u104754251515/baseline/CasMVSNet_baseline_code_20260413/models`?
-- `datasets/` ???????`/home/u104754251515/baseline/CasMVSNet/datasets`?
-- ?????????????????????????????? workflow?
-- ? baseline ???????????????????????????
+The working tree combines a clean baseline model path with the newer training, testing, and evaluation workflow. This keeps the model easy to compare while preserving the scripts needed for the current server workflow.
 
-## ??????
-?????????
-- `datasets/`
-- `lists/`
-- `train.py`
-- `test.py`
-- `fusion-normal.py`
-- `matlab.py`
-- `utils.py`
-- `gipuma.py`
+## Source Rules
 
-## ?????
-?? `train.py/test.py` ???? `CascadeMVSNet` ??????????????? `models/` ? true baseline?????
-- `refine`
-- `ndepths`
-- `depth_interals_ratio`
-- `share_cr`
-- `grad_method`
-- `arch_mode`
-- `cr_base_chs`
-- `use_view_attention`
-- `view_attention_mode`
+- Treat `models/` as the model source of truth.
+- Treat `datasets/`, `train.py`, `test.py`, and scripts as workflow support.
+- Do not assume old experimental modules are active just because they are present in the repository.
+- Any active model change must be wired through `CascadeMVSNet` and exposed through matching train/test flags.
 
-?????????????????????????????????????? `models/` ???????? CLI ?????? `train.py/test.py`?
+## Safe Additions
+
+Safe additions are flag-gated and easy to ablate:
+
+```bash
+--use_view_attention
+--view_attention_mode single_pass_reliability_weighted
+--use_rafe
+--use_adaptive_r2
+```
+
+## Unsafe Additions
+
+Avoid directly mixing old dormant modules into the default path. Avoid changing feature extraction and cost-volume aggregation at the same time unless the combined path has a clear flag and a clean baseline fallback.
+
+## Practical Check
+
+Before launching a long training run:
+
+1. Confirm plain baseline can still instantiate.
+2. Confirm the new flagged model can instantiate.
+3. Run a small tensor smoke test.
+4. Keep command tags explicit and reproducible.
