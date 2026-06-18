@@ -24,6 +24,7 @@ DTU 指标是距离误差，所以越低越好。当前 baseline、SP-RWCV、R2-
 - [交接指南](docs/handoff_guide.md)：服务器连接方式、工作习惯、训练/评估约定、当前 active run。
 - [模型改进日志](docs/model_improvement_log.md)：baseline、SP-RWCV、RAFE、R2-MVSNet、Adaptive R2 的设计记录。
 - [实验结果汇总](docs/experiment_results_summary.md)：官方/本地结果、单场景分析、当前实验状态。
+- [实验目录布局](EXPERIMENT_LAYOUT.md)：训练、测试、融合、本地评估和官方评估的目录约定。
 
 ## Main Flags
 
