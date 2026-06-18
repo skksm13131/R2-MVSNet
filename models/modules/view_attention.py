@@ -62,10 +62,11 @@ class SinglePassReliabilityWeightedViewAttention(nn.Module):
     supports_confidence_guidance = True
 
     def __init__(self, channels, min_hidden_channels=8, max_weight_delta=0.35, confidence_floor=0.35,
-                 use_feature_reliability=False):
+                 use_feature_reliability=False, adaptive_difficulty=False):
         super().__init__()
         hidden_channels = max(min_hidden_channels, channels // 4)
         self.use_feature_reliability = use_feature_reliability
+        self.adaptive_difficulty = adaptive_difficulty
         in_channels = channels * 3 + 2 + (2 if self.use_feature_reliability else 0)
         self.score_net = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=False),
@@ -78,6 +79,9 @@ class SinglePassReliabilityWeightedViewAttention(nn.Module):
         )
         self.temperature = nn.Parameter(torch.tensor(1.0))
         self.residual_scale_logit = nn.Parameter(torch.tensor(-1.6))
+        if self.adaptive_difficulty:
+            self.difficulty_temperature = nn.Parameter(torch.tensor(1.0))
+            self.difficulty_bias = nn.Parameter(torch.tensor(-0.2))
         self.max_weight_delta = max_weight_delta
         self.confidence_floor = confidence_floor
         nn.init.constant_(self.score_net[-1].bias, 0.0)
@@ -103,6 +107,19 @@ class SinglePassReliabilityWeightedViewAttention(nn.Module):
     def score_to_weight(self, raw_score, prev_confidence=None, feature_reliability=None):
         residual_ratio = torch.sigmoid(self.residual_scale_logit) * self.max_weight_delta
         pixel_residual = torch.tanh(raw_score / self.temperature.clamp(min=0.5))
+        if self.adaptive_difficulty:
+            score_difficulty = torch.sigmoid(
+                raw_score.abs() / self.difficulty_temperature.clamp(min=0.5) + self.difficulty_bias
+            )
+            difficulty_terms = [score_difficulty]
+            if prev_confidence is not None:
+                prev_uncertainty = 1.0 - prev_confidence.to(raw_score.dtype).clamp(min=0.0, max=1.0)
+                difficulty_terms.append(prev_uncertainty)
+            if self.use_feature_reliability and feature_reliability is not None:
+                reliability_uncertainty = 1.0 - feature_reliability.to(raw_score.dtype).clamp(min=0.0, max=1.0)
+                difficulty_terms.append(reliability_uncertainty)
+            difficulty_gate = torch.stack(difficulty_terms, dim=0).mean(dim=0).clamp(min=0.0, max=1.0)
+            pixel_residual = pixel_residual * difficulty_gate
         if prev_confidence is not None:
             confidence = prev_confidence.to(raw_score.dtype).clamp(min=0.0, max=1.0)
             confidence = self.confidence_floor + (1.0 - self.confidence_floor) * confidence

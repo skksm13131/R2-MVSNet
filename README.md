@@ -19,6 +19,12 @@ When both are enabled, RAFE reliability maps are homography-warped together with
 
 DTU metrics are distance errors, so lower is better. Current baseline, SP-RWCV, and R2-MVSNet evaluation summaries are tracked in [docs/evaluation_results.md](docs/evaluation_results.md), with raw CSV files in [docs/results](docs/results).
 
+## Project Memory
+
+- [Handoff guide](docs/handoff_guide.md): server access pattern, working habits, training/evaluation conventions, and current active run.
+- [Model improvement log](docs/model_improvement_log.md): baseline, SP-RWCV, RAFE, R2-MVSNet, and Adaptive R2 design notes.
+- [Experiment results summary](docs/experiment_results_summary.md): official/local results, single-scene analysis, and active experiment status.
+
 ## Main Flags
 
 Train plain baseline:

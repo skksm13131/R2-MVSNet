@@ -172,7 +172,7 @@ class DepthNet(nn.Module):
 class CascadeMVSNet(nn.Module):
     def __init__(self, refine=False, ndepths=[48, 32, 8], depth_interals_ratio=[4, 2, 1], share_cr=False,
                  grad_method='detach', arch_mode='fpn', cr_base_chs=[8, 8, 8], use_view_attention=False,
-                 view_attention_mode='legacy', use_rafe=False):
+                 view_attention_mode='legacy', use_rafe=False, use_adaptive_r2=False):
         super(CascadeMVSNet, self).__init__()
         self.refine = refine
         self.share_cr = share_cr
@@ -185,8 +185,9 @@ class CascadeMVSNet(nn.Module):
         self.use_view_attention = use_view_attention
         self.view_attention_mode = view_attention_mode
         self.use_rafe = use_rafe
-        print('**********netphs:{}, depth_intervals_ratio:{},  grad:{}, chs:{}, view_attention:{}, mode:{}, rafe:{}************'.format(
-              ndepths, depth_interals_ratio, self.grad_method, self.cr_base_chs, use_view_attention, view_attention_mode, use_rafe))
+        self.use_adaptive_r2 = use_adaptive_r2
+        print('**********netphs:{}, depth_intervals_ratio:{},  grad:{}, chs:{}, view_attention:{}, mode:{}, rafe:{}, adaptive_r2:{}************'.format(
+              ndepths, depth_interals_ratio, self.grad_method, self.cr_base_chs, use_view_attention, view_attention_mode, use_rafe, use_adaptive_r2))
 
         assert len(ndepths) == len(depth_interals_ratio)
 
@@ -197,7 +198,8 @@ class CascadeMVSNet(nn.Module):
         }
 
         self.feature = FeatureNet(base_channels=8, stride=4, num_stage=self.num_stage,
-                                  arch_mode=self.arch_mode, use_rafe=self.use_rafe)
+                                  arch_mode=self.arch_mode, use_rafe=self.use_rafe,
+                                  use_adaptive_r2=self.use_adaptive_r2)
 
         if self.share_cr:
             self.cost_regularization = CostRegNet(in_channels=self.feature.out_channels, base_channels=8)
@@ -233,6 +235,7 @@ class CascadeMVSNet(nn.Module):
                         ch,
                         max_weight_delta=0.25 if idx == 0 else 0.35,
                         use_feature_reliability=self.use_rafe,
+                        adaptive_difficulty=self.use_adaptive_r2,
                     )
                     for idx, ch in enumerate(self.feature.out_channels)
                 ])

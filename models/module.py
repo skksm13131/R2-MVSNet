@@ -687,9 +687,10 @@ class DeConv2dFuse(nn.Module):
 class ReliabilityAwareFeatureAdapter(nn.Module):
     """Feature-side reliability estimator with residual structure-aware enhancement."""
 
-    def __init__(self, channels, prior_channels=7, min_hidden_channels=8):
+    def __init__(self, channels, prior_channels=7, min_hidden_channels=8, adaptive_difficulty=False):
         super(ReliabilityAwareFeatureAdapter, self).__init__()
         hidden_channels = max(min_hidden_channels, channels // 2)
+        self.adaptive_difficulty = adaptive_difficulty
         self.prior_proj = nn.Sequential(
             Conv2d(prior_channels, hidden_channels, 3, 1, padding=1),
             nn.Conv2d(hidden_channels, channels, 1, bias=False),
@@ -702,9 +703,16 @@ class ReliabilityAwareFeatureAdapter(nn.Module):
             Conv2d(channels * 2, hidden_channels, 3, 1, padding=1),
             nn.Conv2d(hidden_channels, 1, 1, bias=True),
         )
+        if self.adaptive_difficulty:
+            self.difficulty_head = nn.Sequential(
+                Conv2d(channels * 2 + 1, hidden_channels, 3, 1, padding=1),
+                nn.Conv2d(hidden_channels, 1, 1, bias=True),
+            )
         self.residual_scale_logit = nn.Parameter(torch.tensor(-2.2))
         nn.init.constant_(self.gate[-1].bias, -2.0)
         nn.init.constant_(self.reliability_head[-1].bias, 0.0)
+        if self.adaptive_difficulty:
+            nn.init.constant_(self.difficulty_head[-1].bias, -1.0)
 
     def forward(self, feature, structure_prior, parent_reliability=None):
         structure_prior = F.interpolate(
@@ -728,12 +736,22 @@ class ReliabilityAwareFeatureAdapter(nn.Module):
         gate = torch.sigmoid(self.gate(reliability_input))
         residual_scale = torch.sigmoid(self.residual_scale_logit)
         reliability_gate = (0.5 + reliability).clamp(min=0.5, max=1.5)
-        enhanced_feature = feature + residual_scale * gate * reliability_gate * prior_feature
+        if self.adaptive_difficulty:
+            prior_energy = prior_feature.abs().mean(dim=1, keepdim=True)
+            prior_energy = prior_energy / (prior_energy.mean(dim=[2, 3], keepdim=True) + 1e-6)
+            difficulty_input = torch.cat([reliability_input, prior_energy], dim=1)
+            learned_difficulty = torch.sigmoid(self.difficulty_head(difficulty_input))
+            reliability_uncertainty = (1.0 - reliability).clamp(min=0.0, max=1.0)
+            difficulty_gate = (0.6 * learned_difficulty + 0.4 * reliability_uncertainty).clamp(min=0.0, max=1.0)
+        else:
+            difficulty_gate = 1.0
+        enhanced_feature = feature + residual_scale * gate * reliability_gate * difficulty_gate * prior_feature
         return enhanced_feature, reliability
 
 
 class FeatureNet(nn.Module):
-    def __init__(self, base_channels, num_stage=3, stride=4, arch_mode="unet", use_rafe=False):
+    def __init__(self, base_channels, num_stage=3, stride=4, arch_mode="unet", use_rafe=False,
+                 use_adaptive_r2=False):
         super(FeatureNet, self).__init__()
         assert arch_mode in ["unet", "fpn"], print("mode must be in 'unet' or 'fpn', but get:{}".format(arch_mode))
         print("*************feature extraction arch mode:{}****************".format(arch_mode))
@@ -742,8 +760,11 @@ class FeatureNet(nn.Module):
         self.base_channels = base_channels
         self.num_stage = num_stage
         self.use_rafe = use_rafe
+        self.use_adaptive_r2 = use_adaptive_r2
         if self.use_rafe:
             print("*************RAFE reliability-aware feature extraction enabled****************")
+            if self.use_adaptive_r2:
+                print("*************Adaptive R2 difficulty gating enabled in RAFE****************")
 
         self.conv0 = nn.Sequential(
             Conv2d(3, base_channels, 3, 1, padding=1),
@@ -778,9 +799,9 @@ class FeatureNet(nn.Module):
 
         if self.use_rafe:
             self.rafe_adapters = nn.ModuleDict({
-                "stage1": ReliabilityAwareFeatureAdapter(base_channels * 4),
-                "stage2": ReliabilityAwareFeatureAdapter(base_channels * 2),
-                "stage3": ReliabilityAwareFeatureAdapter(base_channels),
+                "stage1": ReliabilityAwareFeatureAdapter(base_channels * 4, adaptive_difficulty=self.use_adaptive_r2),
+                "stage2": ReliabilityAwareFeatureAdapter(base_channels * 2, adaptive_difficulty=self.use_adaptive_r2),
+                "stage3": ReliabilityAwareFeatureAdapter(base_channels, adaptive_difficulty=self.use_adaptive_r2),
             })
 
     def _normalize_prior_channel(self, x):

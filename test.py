@@ -81,6 +81,7 @@ parser.add_argument('--cadr_max_residual_ratio', type=float, default=0.45, help=
 parser.add_argument('--cadr_confidence_mix', type=float, default=0.5, help='CADR blend between propagated confidence and peak confidence')
 parser.add_argument('--use_rmfe', action='store_true', help='enable RMFE learnable multi-scale feature enhancement')
 parser.add_argument('--use_rafe', action='store_true', help='enable reliability-aware feature extraction')
+parser.add_argument('--use_adaptive_r2', action='store_true', help='enable difficulty-adaptive RAFE and SP-RWCV gating')
 parser.add_argument('--use_ugdr', action='store_true', help='enable UGDR final-stage bounded depth refinement')
 parser.add_argument('--ugdr_max_residual_ratio', type=float, default=0.5, help='UGDR maximum residual as a ratio of final-stage interval')
 parser.add_argument('--use_sparse_feature_attention', action='store_true', help='enable sparse feature attention')
@@ -158,7 +159,8 @@ def save_scene_depth(testlist):
                           grad_method=args.grad_method,
                           use_view_attention=args.use_view_attention,
                           view_attention_mode=args.view_attention_mode,
-                          use_rafe=args.use_rafe)
+                          use_rafe=args.use_rafe,
+                          use_adaptive_r2=args.use_adaptive_r2)
 
     # load checkpoint file specified by args.loadckpt
     print("loading model {}".format(args.loadckpt))
