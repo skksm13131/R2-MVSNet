@@ -15,15 +15,15 @@ The current research branch adds two reliability-driven components:
 
 When both are enabled, RAFE reliability maps are homography-warped together with source features and are consumed by SP-RWCV while computing source-view weights.
 
-## Evaluation
+## 评估
 
-DTU metrics are distance errors, so lower is better. Current baseline, SP-RWCV, and R2-MVSNet evaluation summaries are tracked in [docs/evaluation_results.md](docs/evaluation_results.md), with raw CSV files in [docs/results](docs/results).
+DTU 指标是距离误差，所以越低越好。当前 baseline、SP-RWCV、R2-MVSNet 的评估汇总记录在 [docs/evaluation_results.md](docs/evaluation_results.md)，原始 CSV 保存在 [docs/results](docs/results)。
 
-## Project Memory
+## 项目记忆
 
-- [Handoff guide](docs/handoff_guide.md): server access pattern, working habits, training/evaluation conventions, and current active run.
-- [Model improvement log](docs/model_improvement_log.md): baseline, SP-RWCV, RAFE, R2-MVSNet, and Adaptive R2 design notes.
-- [Experiment results summary](docs/experiment_results_summary.md): official/local results, single-scene analysis, and active experiment status.
+- [交接指南](docs/handoff_guide.md)：服务器连接方式、工作习惯、训练/评估约定、当前 active run。
+- [模型改进日志](docs/model_improvement_log.md)：baseline、SP-RWCV、RAFE、R2-MVSNet、Adaptive R2 的设计记录。
+- [实验结果汇总](docs/experiment_results_summary.md)：官方/本地结果、单场景分析、当前实验状态。
 
 ## Main Flags
 

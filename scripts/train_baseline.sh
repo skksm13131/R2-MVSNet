@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  echo "Usage: $0 <run_tag> [extra train.py args...]" >&2
+  echo "用法: $0 <训练tag> [额外 train.py 参数...]" >&2
   exit 1
 fi
 TAG="$1"
@@ -14,12 +14,12 @@ LOG_DIR="$TRAIN_DIR/logs"
 mkdir -p "$LOG_DIR"
 CMD=("$PYTHON" "$ROOT/train.py" --logdir "$TRAIN_DIR" "$@")
 {
-  echo "# Training run: $TAG"
+  echo "# 训练任务: $TAG"
   echo
-  echo "- Started: $(date '+%Y-%m-%d %H:%M:%S')"
-  echo "- Repo: $ROOT"
-  echo "- Checkpoint dir: $TRAIN_DIR"
-  echo "- Command:"
+  echo "- 开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "- 仓库目录: $ROOT"
+  echo "- Checkpoint 目录: $TRAIN_DIR"
+  echo "- 命令:"
   printf '  `'; printf '%q ' "${CMD[@]}"; echo '`'
 } > "$TRAIN_DIR/RUN_INFO.md"
 {
@@ -31,5 +31,5 @@ CMD=("$PYTHON" "$ROOT/train.py" --logdir "$TRAIN_DIR" "$@")
 chmod +x "$TRAIN_DIR/run_train.sh"
 nohup "${CMD[@]}" > "$LOG_DIR/stdout.log" 2>&1 &
 echo $! > "$TRAIN_DIR/train.pid"
-echo "Training started. PID=$(cat "$TRAIN_DIR/train.pid")"
-echo "Log: $LOG_DIR/stdout.log"
+echo "训练已启动。PID=$(cat "$TRAIN_DIR/train.pid")"
+echo "日志: $LOG_DIR/stdout.log"

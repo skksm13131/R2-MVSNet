@@ -1,68 +1,68 @@
-# SP-RWCV Design Note
+# SP-RWCV 设计说明
 
-SP-RWCV means:
+SP-RWCV 全称：
 
 ```text
 Single-Pass Reliability-Weighted Cost Volume
 ```
 
-## Motivation
+## 动机
 
-Earlier residual-fusion directions could improve quality, but they were slow because they required extra source-view processing or repeated homography warping. SP-RWCV keeps the cascade MVS pipeline close to baseline while adding a learned source-view reliability weight during variance cost-volume construction.
+早期 residual-fusion 方向有一定提升，但速度较慢，因为需要额外的源图处理或重复 homography warping。SP-RWCV 保持 cascade MVS 主流程接近 baseline，只在 variance cost volume 构建时加入源图可靠性权重。
 
-## Runtime Flags
+## 运行参数
 
 ```bash
 --use_view_attention \
 --view_attention_mode single_pass_reliability_weighted
 ```
 
-## Per-Stage Flow
+## 单阶段流程
 
-For each cascade stage:
+每个 cascade stage 内：
 
-1. Build the reference volume from the reference feature.
-2. Homography-warp each source feature once.
-3. Predict a source-view reliability score from reference/source agreement.
-4. Convert the score into a bounded reliability weight.
-5. Accumulate weighted feature sums and weighted squared sums.
-6. Compute the weighted variance cost volume.
-7. Send the cost volume to the normal 3D cost regularization and depth regression path.
+1. 从参考图特征构建 reference volume。
+2. 每个源图特征只做一次 homography warping。
+3. 根据参考图和源图的一致性预测源图 reliability score。
+4. 将 score 转成有界可靠性权重。
+5. 累积加权 feature sum 和 weighted squared sum。
+6. 得到 weighted variance cost volume。
+7. 后续仍走正常 3D cost regularization 和 depth regression。
 
-## Weighting Formula
+## 权重公式
 
-For source view `i`:
+对源图 `i`：
 
 ```text
 w_i = 1 + residual_ratio * tanh(score_i / temperature)
 ```
 
-The implementation clamps the final weight to keep training stable.
+实现中会 clamp 最终权重，保证训练稳定。
 
-The weighted variance is:
+加权方差：
 
 ```text
 mean = sum(w_i * F_i) / sum(w_i)
 variance = sum(w_i * F_i^2) / sum(w_i) - mean^2
 ```
 
-The reference view keeps weight `1`.
+参考图权重保持为 `1`。
 
-## Difference From SCRF/RRF
+## 和 SCRF/RRF 的区别
 
-- SP-RWCV performs reliability weighting in a single source-view warping pass.
-- It changes the variance statistics directly instead of adding a separate residual cost-volume branch.
-- It is designed to be faster and easier to ablate.
+- SP-RWCV 只做一次源图 warping。
+- 它直接修改 variance 统计，不额外开一个 residual cost-volume 分支。
+- 设计目标是更快、更容易 ablation。
 
-## Implementation Files
+## 实现文件
 
 - `models/modules/view_attention.py`
   - `SinglePassReliabilityWeightedViewAttention`
 - `models/cas_mvsnet.py`
-  - `DepthNet.forward()` branch for `uses_single_pass_weighted_variance`
-- `train.py` and `test.py`
-  - expose `--view_attention_mode single_pass_reliability_weighted`
+  - `DepthNet.forward()` 中的 `uses_single_pass_weighted_variance` 分支
+- `train.py` 和 `test.py`
+  - 暴露 `--view_attention_mode single_pass_reliability_weighted`
 
-## Current Status
+## 当前状态
 
-SP-RWCV gave a small but repeatable official DTU improvement over the plain baseline. RAFE and Adaptive R2 build on top of this path.
+SP-RWCV 相比 plain baseline 在官方 DTU 上有小幅、可复现提升。RAFE 和 Adaptive R2 都是在这个路径上继续发展。
