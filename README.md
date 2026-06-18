@@ -1,58 +1,39 @@
 # R2-MVSNet
 
-Reliability-aware Representation and Reliability-weighted Cost Volume Network for multi-view stereo.
-
-This repository is based on CasMVSNet and keeps the original cascade MVS pipeline:
+本仓库基于 CasMVSNet，当前主线是研究可靠性引导的多视图立体匹配改进：
 
 ```text
-FeatureNet -> cascade depth sampling -> homography warping -> cost-volume regularization -> depth regression
+Plain CasMVSNet -> SP-RWCV -> RAFE + SP-RWCV -> Adaptive R2
 ```
 
-The current research branch adds two reliability-driven components:
+默认无增强路径必须始终保持可运行，用来作为所有实验的 baseline。
 
-- **RAFE**: Reliability-Aware Feature Extraction. FeatureNet predicts multi-scale feature reliability maps and injects structure-aware residual cues into stage features.
-- **SP-RWCV**: Single-Pass Reliability-Weighted Cost Volume. Source-view warped features are weighted during variance cost-volume construction using learned reliability scores.
+## 文档阅读顺序
 
-When both are enabled, RAFE reliability maps are homography-warped together with source features and are consumed by SP-RWCV while computing source-view weights.
+新智能体或新对话接手时，按下面顺序阅读：
 
-## 评估
+1. [项目交接](docs/00_project_handoff.md)：当前状态、服务器目录、常用命令、下一步。
+2. [工作习惯](docs/01_working_rules.md)：协作方式、实验记录规则、模型改动边界。
+3. [实验结果](docs/02_experiment_results.md)：官方/本地 DTU 指标、关键结论、原始 CSV。
+4. [改进日志](docs/03_improvement_log.md)：模型从 baseline 到 Adaptive R2 的演进原因。
 
-DTU 指标是距离误差，所以越低越好。当前 baseline、SP-RWCV、R2-MVSNet 的评估汇总记录在 [docs/evaluation_results.md](docs/evaluation_results.md)，原始 CSV 保存在 [docs/results](docs/results)。
+原始实验 CSV 放在 [docs/data](docs/data)。
 
-## 项目记忆
+## 常用入口
 
-- [交接指南](docs/handoff_guide.md)：服务器连接方式、工作习惯、训练/评估约定、当前 active run。
-- [模型改进日志](docs/model_improvement_log.md)：baseline、SP-RWCV、RAFE、R2-MVSNet、Adaptive R2 的设计记录。
-- [实验结果汇总](docs/experiment_results_summary.md)：官方/本地结果、单场景分析、当前实验状态。
-- [实验目录布局](EXPERIMENT_LAYOUT.md)：训练、测试、融合、本地评估和官方评估的目录约定。
-
-## Main Flags
-
-Train plain baseline:
-
-```bash
-python train.py --epochs 16 --batch_size 6 --pin_m
-```
-
-Train RAFE only:
-
-```bash
-python train.py --epochs 16 --batch_size 5 --pin_m --use_rafe
-```
-
-Train R2-MVSNet:
+训练 R2-MVSNet：
 
 ```bash
 python train.py \
   --epochs 16 \
-  --batch_size 5 \
+  --batch_size 4 \
   --pin_m \
   --use_rafe \
   --use_view_attention \
   --view_attention_mode single_pass_reliability_weighted
 ```
 
-Test R2-MVSNet:
+测试 R2-MVSNet：
 
 ```bash
 python test.py \
@@ -63,14 +44,13 @@ python test.py \
   --view_attention_mode single_pass_reliability_weighted
 ```
 
-Fuse and evaluate:
+融合与评估：
 
 ```bash
 python fusion-normal.py --outdir outputs_retest/<tag>
 python matlab.py --plyPath outputs_retest/<tag> --resultPath results_m/retest_<tag>
 ```
 
-## Notes
+## 注意
 
-- Dataset paths in `train.py`, `test.py`, and evaluation scripts are local defaults and should be overridden for a new environment.
-- Runtime artifacts such as checkpoints, point clouds, tensorboard logs, and evaluation outputs are intentionally excluded from git.
+`checkpoints/`、点云、TensorBoard 日志、完整评估输出等运行产物不要提交到 git。
