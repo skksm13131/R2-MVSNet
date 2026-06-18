@@ -17,7 +17,7 @@ When both are enabled, RAFE reliability maps are homography-warped together with
 
 ## Evaluation
 
-DTU metrics are distance errors, so lower is better. Current baseline and SP-RWCV evaluation summaries are tracked in [docs/evaluation_results.md](docs/evaluation_results.md), with raw CSV files in [docs/results](docs/results).
+DTU metrics are distance errors, so lower is better. Current baseline, SP-RWCV, and R2-MVSNet evaluation summaries are tracked in [docs/evaluation_results.md](docs/evaluation_results.md), with raw CSV files in [docs/results](docs/results).
 
 ## Main Flags
 
