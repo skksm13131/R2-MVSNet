@@ -918,6 +918,75 @@ class RefineNet(nn.Module):
         return depth_refined
 
 
+class FusionGuidedDepthRefinement(nn.Module):
+    def __init__(self, in_channels, hidden_channels=16, max_radius_factor=2.0):
+        super(FusionGuidedDepthRefinement, self).__init__()
+        self.max_radius_factor = max_radius_factor
+        self.context = nn.Sequential(
+            ConvBnReLU(in_channels + 4, hidden_channels),
+            ConvBnReLU(hidden_channels, hidden_channels),
+        )
+        self.residual_head = nn.Conv2d(hidden_channels, 1, 3, padding=1)
+        self.radius_head = nn.Conv2d(hidden_channels, 1, 3, padding=1)
+        self.gate_head = nn.Conv2d(hidden_channels, 1, 3, padding=1)
+
+    def forward(self, ref_feature, depth, depth_values, confidence,
+                ref_reliability=None, view_weights=None):
+        depth_min = depth_values.min(dim=1)[0]
+        depth_max = depth_values.max(dim=1)[0]
+        depth_span = (depth_max - depth_min).clamp(min=1e-6)
+        if depth_values.size(1) > 1:
+            depth_interval = (depth_values[:, 1:] - depth_values[:, :-1]).abs().mean(dim=1)
+        else:
+            depth_interval = depth_span
+
+        depth_norm = ((depth - depth_min) / depth_span).clamp(0.0, 1.0).unsqueeze(1)
+        confidence = confidence.unsqueeze(1).clamp(0.0, 1.0)
+
+        if ref_reliability is None:
+            ref_reliability = ref_feature.new_ones(depth_norm.shape)
+        elif ref_reliability.shape[-2:] != ref_feature.shape[-2:]:
+            ref_reliability = F.interpolate(
+                ref_reliability,
+                size=ref_feature.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if view_weights is None:
+            view_uncertainty = ref_feature.new_zeros(depth_norm.shape)
+        else:
+            if view_weights.shape[-2:] != ref_feature.shape[-2:]:
+                view_weights = F.interpolate(view_weights, size=ref_feature.shape[-2:], mode="nearest")
+            view_mean = view_weights.mean(dim=1, keepdim=True)
+            view_uncertainty = view_weights.std(dim=1, keepdim=True, unbiased=False) / (view_mean.abs() + 1e-6)
+            view_uncertainty = view_uncertainty.clamp(0.0, 1.0)
+
+        fgdr_input = torch.cat([ref_feature, depth_norm, confidence, ref_reliability, view_uncertainty], dim=1)
+        context = self.context(fgdr_input)
+        geometry_gate = torch.sigmoid(self.gate_head(context))
+        uncertainty = torch.sigmoid(self.radius_head(context))
+
+        max_radius = depth_interval.unsqueeze(1) * self.max_radius_factor
+        delta = (0.25 + 0.75 * uncertainty * geometry_gate) * max_radius
+        residual = torch.tanh(self.residual_head(context)) * delta * geometry_gate
+
+        depth_main = (depth.unsqueeze(1) + residual).squeeze(1)
+        depth_near = (depth_main.unsqueeze(1) - delta).squeeze(1)
+        depth_far = (depth_main.unsqueeze(1) + delta).squeeze(1)
+
+        return {
+            "depth": depth_main,
+            "fgdr_depth_base": depth,
+            "fgdr_depth_main": depth_main,
+            "fgdr_depth_near": depth_near,
+            "fgdr_depth_far": depth_far,
+            "fgdr_delta": delta.squeeze(1),
+            "fgdr_geometry_gate": geometry_gate.squeeze(1),
+            "fgdr_uncertainty": uncertainty.squeeze(1),
+        }
+
+
 def depth_regression(p, depth_values):
     if depth_values.dim() <= 2:
         # print("regression dim <= 2")
@@ -928,8 +997,12 @@ def depth_regression(p, depth_values):
 
 def cas_mvsnet_loss(inputs, depth_gt_ms, mask_ms, **kwargs):
     depth_loss_weights = kwargs.get("dlossw", None)
+    fgdr_loss_weight = kwargs.get("fgdr_loss_weight", 0.0)
+    fgdr_radius_weight = kwargs.get("fgdr_radius_weight", 0.1)
+    fgdr_center_weight = kwargs.get("fgdr_center_weight", 0.25)
 
     total_loss = torch.tensor(0.0, dtype=torch.float32, device=mask_ms["stage1"].device, requires_grad=False)
+    fgdr_loss = torch.tensor(0.0, dtype=torch.float32, device=mask_ms["stage1"].device, requires_grad=False)
 
     for (stage_inputs, stage_key) in [(inputs[k], k) for k in inputs.keys() if "stage" in k]:
         depth_est = stage_inputs["depth"]
@@ -945,7 +1018,43 @@ def cas_mvsnet_loss(inputs, depth_gt_ms, mask_ms, **kwargs):
         else:
             total_loss += 1.0 * depth_loss
 
-    return total_loss, depth_loss
+        if fgdr_loss_weight > 0.0 and "fgdr_depth_near" in stage_inputs and "fgdr_depth_far" in stage_inputs:
+            depth_near = stage_inputs["fgdr_depth_near"]
+            depth_far = stage_inputs["fgdr_depth_far"]
+            delta = stage_inputs["fgdr_delta"]
+            gate = stage_inputs["fgdr_geometry_gate"]
+            confidence = stage_inputs.get("photometric_confidence", None)
+            if confidence is None:
+                confidence = depth_est.new_ones(depth_est.shape)
+            cover_loss = F.smooth_l1_loss(
+                F.relu(depth_near[mask] - depth_gt[mask]) + F.relu(depth_gt[mask] - depth_far[mask]),
+                torch.zeros_like(depth_gt[mask]),
+                reduction='mean',
+            )
+            high_confidence_radius = F.smooth_l1_loss(
+                (confidence[mask].detach() * gate[mask] * delta[mask]),
+                torch.zeros_like(delta[mask]),
+                reduction='mean',
+            )
+            candidate_center = stage_inputs.get("fgdr_depth_main", stage_inputs["depth"])
+            candidate_center_loss = F.smooth_l1_loss(
+                candidate_center[mask],
+                depth_gt[mask],
+                reduction='mean',
+            )
+            stage_fgdr_loss = (
+                cover_loss +
+                fgdr_center_weight * candidate_center_loss +
+                fgdr_radius_weight * high_confidence_radius
+            )
+            fgdr_loss = fgdr_loss + stage_fgdr_loss
+            if depth_loss_weights is not None:
+                stage_idx = int(stage_key.replace("stage", "")) - 1
+                total_loss += depth_loss_weights[stage_idx] * fgdr_loss_weight * stage_fgdr_loss
+            else:
+                total_loss += fgdr_loss_weight * stage_fgdr_loss
+
+    return total_loss, depth_loss, total_loss.new_tensor(0.0), fgdr_loss
 
 
 def get_cur_depth_range_samples(cur_depth, ndepth, depth_inteval_pixel, shape, max_depth=192.0, min_depth=0.0):

@@ -16,6 +16,7 @@ Plain CasMVSNet -> SP-RWCV -> RAFE + SP-RWCV -> Adaptive R2
 2. [工作习惯](docs/01_working_rules.md)：协作方式、实验记录规则、模型改动边界。
 3. [实验结果](docs/02_experiment_results.md)：官方/本地 DTU 指标、关键结论、原始 CSV。
 4. [改进日志](docs/03_improvement_log.md)：模型从 baseline 到 Adaptive R2 的演进原因。
+5. [第三创新点设计](docs/04_third_innovation_fgdr.md)：FGDR 深度几何重构与点云融合协同方案。
 
 原始实验 CSV 放在 [docs/data](docs/data)。
 

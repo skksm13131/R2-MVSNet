@@ -172,7 +172,8 @@ class DepthNet(nn.Module):
 class CascadeMVSNet(nn.Module):
     def __init__(self, refine=False, ndepths=[48, 32, 8], depth_interals_ratio=[4, 2, 1], share_cr=False,
                  grad_method='detach', arch_mode='fpn', cr_base_chs=[8, 8, 8], use_view_attention=False,
-                 view_attention_mode='legacy', use_rafe=False, use_adaptive_r2=False):
+                 view_attention_mode='legacy', use_rafe=False, use_adaptive_r2=False,
+                 use_fgdr=False, fgdr_max_radius_factor=2.0, fgdr_anchor_base=False):
         super(CascadeMVSNet, self).__init__()
         self.refine = refine
         self.share_cr = share_cr
@@ -186,8 +187,11 @@ class CascadeMVSNet(nn.Module):
         self.view_attention_mode = view_attention_mode
         self.use_rafe = use_rafe
         self.use_adaptive_r2 = use_adaptive_r2
-        print('**********netphs:{}, depth_intervals_ratio:{},  grad:{}, chs:{}, view_attention:{}, mode:{}, rafe:{}, adaptive_r2:{}************'.format(
-              ndepths, depth_interals_ratio, self.grad_method, self.cr_base_chs, use_view_attention, view_attention_mode, use_rafe, use_adaptive_r2))
+        self.use_fgdr = use_fgdr
+        self.fgdr_max_radius_factor = fgdr_max_radius_factor
+        self.fgdr_anchor_base = fgdr_anchor_base
+        print('**********netphs:{}, depth_intervals_ratio:{},  grad:{}, chs:{}, view_attention:{}, mode:{}, rafe:{}, adaptive_r2:{}, fgdr:{}, fgdr_anchor_base:{}************'.format(
+              ndepths, depth_interals_ratio, self.grad_method, self.cr_base_chs, use_view_attention, view_attention_mode, use_rafe, use_adaptive_r2, use_fgdr, fgdr_anchor_base))
 
         assert len(ndepths) == len(depth_interals_ratio)
 
@@ -211,6 +215,13 @@ class CascadeMVSNet(nn.Module):
 
         if self.refine:
             self.refine_network = RefineNet()
+
+        if self.use_fgdr:
+            self.fgdr_modules = nn.ModuleList([
+                FusionGuidedDepthRefinement(ch, hidden_channels=max(8, ch // 2),
+                                            max_radius_factor=self.fgdr_max_radius_factor)
+                for ch in self.feature.out_channels
+            ])
 
         self.DepthNet = DepthNet()
         if self.use_view_attention:
@@ -328,6 +339,26 @@ class CascadeMVSNet(nn.Module):
                 prev_confidence=stage_prev_confidence,
                 feature_reliabilities=feature_reliabilities_stage,
             )
+
+            if self.use_fgdr and stage_idx < len(self.fgdr_modules):
+                base_depth = outputs_stage['depth']
+                ref_reliability = feature_reliabilities_stage[0] if feature_reliabilities_stage is not None else None
+                fgdr_outputs = self.fgdr_modules[stage_idx](
+                    features_stage[0],
+                    outputs_stage['depth'],
+                    depth_values=F.interpolate(
+                        depth_range_samples.unsqueeze(1),
+                        [self.ndepths[stage_idx], img.shape[2] // int(stage_scale), img.shape[3] // int(stage_scale)],
+                        mode='trilinear',
+                        align_corners=Align_Corners_Range,
+                    ).squeeze(1),
+                    confidence=outputs_stage['photometric_confidence'],
+                    ref_reliability=ref_reliability,
+                    view_weights=outputs_stage.get('view_weights'),
+                )
+                if self.fgdr_anchor_base:
+                    fgdr_outputs["depth"] = base_depth
+                outputs_stage.update(fgdr_outputs)
 
             depth = outputs_stage['depth']
             if outputs_stage.get('view_weights') is not None:

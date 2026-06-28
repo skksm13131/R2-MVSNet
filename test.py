@@ -24,11 +24,17 @@ import signal
 
 cudnn.benchmark = True
 
+SHARED_ROOT = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
+DTU_TEST_ROOT = os.environ.get(
+    "R2MVSNET_DTU_TEST_PATH",
+    os.path.join(SHARED_ROOT, "datasets", "dtu_testing"),
+)
+
 parser = argparse.ArgumentParser(description='Predict depth, filter, and fuse')
 parser.add_argument('--model', default='mvsnet', help='select model')
 
 parser.add_argument('--dataset', default='general_eval', help='select dataset')
-parser.add_argument('--testpath', default='/home/u104754251515/data/dtu_testing', help='testing data dir for some scenes')
+parser.add_argument('--testpath', default=DTU_TEST_ROOT, help='testing data dir for some scenes')
 parser.add_argument('--testpath_single_scene', help='testing data path for single scene')
 parser.add_argument('--testlist', default='lists/dtu/test.txt', help='testing scene list')
 
@@ -82,6 +88,9 @@ parser.add_argument('--cadr_confidence_mix', type=float, default=0.5, help='CADR
 parser.add_argument('--use_rmfe', action='store_true', help='enable RMFE learnable multi-scale feature enhancement')
 parser.add_argument('--use_rafe', action='store_true', help='enable reliability-aware feature extraction')
 parser.add_argument('--use_adaptive_r2', action='store_true', help='enable difficulty-adaptive RAFE and SP-RWCV gating')
+parser.add_argument('--use_fgdr', action='store_true', help='enable progressive fusion-guided depth refinement')
+parser.add_argument('--fgdr_max_radius_factor', type=float, default=2.0, help='maximum FGDR candidate radius in local depth intervals')
+parser.add_argument('--fgdr_anchor_base', action='store_true', help='keep original R2 depth as the cascade/fusion anchor')
 parser.add_argument('--use_ugdr', action='store_true', help='enable UGDR final-stage bounded depth refinement')
 parser.add_argument('--ugdr_max_residual_ratio', type=float, default=0.5, help='UGDR maximum residual as a ratio of final-stage interval')
 parser.add_argument('--use_sparse_feature_attention', action='store_true', help='enable sparse feature attention')
@@ -160,7 +169,10 @@ def save_scene_depth(testlist):
                           use_view_attention=args.use_view_attention,
                           view_attention_mode=args.view_attention_mode,
                           use_rafe=args.use_rafe,
-                          use_adaptive_r2=args.use_adaptive_r2)
+                          use_adaptive_r2=args.use_adaptive_r2,
+                          use_fgdr=args.use_fgdr,
+                          fgdr_max_radius_factor=args.fgdr_max_radius_factor,
+                          fgdr_anchor_base=args.fgdr_anchor_base)
 
     # load checkpoint file specified by args.loadckpt
     print("loading model {}".format(args.loadckpt))
@@ -185,9 +197,8 @@ def save_scene_depth(testlist):
                                                       imgs[0].shape))
 
             # save depth maps and confidence maps
-            for filename, cam, img, depth_est, photometric_confidence in zip(filenames, cams, imgs,
-                                                                             outputs["depth"],
-                                                                             outputs["photometric_confidence"]):
+            for sample_idx, (filename, cam, img, depth_est, photometric_confidence) in enumerate(
+                    zip(filenames, cams, imgs, outputs["depth"], outputs["photometric_confidence"])):
                 img = img[0]  # ref view
                 cam = cam[0]  # ref cam
                 depth_filename = os.path.join(args.outdir, filename.format('depth_est', '.pfm'))
@@ -209,6 +220,21 @@ def save_scene_depth(testlist):
                 img = np.clip(np.transpose(img, (1, 2, 0)) * 255, 0, 255).astype(np.uint8)
                 img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(img_filename, img_bgr)
+
+                if args.use_fgdr:
+                    fgdr_outputs = {
+                        'depth_candidate_main': outputs['fgdr_depth_main'][sample_idx],
+                        'depth_near': outputs['fgdr_depth_near'][sample_idx],
+                        'depth_far': outputs['fgdr_depth_far'][sample_idx],
+                        'geometry_gate': outputs['fgdr_geometry_gate'][sample_idx],
+                        'uncertainty': outputs['fgdr_uncertainty'][sample_idx],
+                        'depth_delta': outputs['fgdr_delta'][sample_idx],
+                        'depth_base': outputs['fgdr_depth_base'][sample_idx],
+                    }
+                    for folder, value in fgdr_outputs.items():
+                        fgdr_filename = os.path.join(args.outdir, filename.format(folder, '.pfm'))
+                        os.makedirs(fgdr_filename.rsplit('/', 1)[0], exist_ok=True)
+                        save_pfm(fgdr_filename, value)
 
                 # vis disabled for headless server
 

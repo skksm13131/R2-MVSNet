@@ -12,6 +12,12 @@ from PIL import Image
 from datasets.data_io import read_pfm, save_pfm
 import signal
 
+SHARED_ROOT = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
+DTU_TEST_ROOT = os.environ.get(
+    "R2MVSNET_DTU_TEST_PATH",
+    os.path.join(SHARED_ROOT, "datasets", "dtu_testing"),
+)
+
 parser = argparse.ArgumentParser(
     description='Filter depth maps and fuse point cloud with NORMAL method, independently.')
 parser.add_argument('--conf', type=float, default=0.8, help='Photometric confidence threshold.')
@@ -23,10 +29,16 @@ parser.add_argument('--dist_base', type=float, default=0.25,
                     help='Base unit for pixel distance threshold. Final threshold is i * dist_base.')
 parser.add_argument('--diff_base', type=float, default=0.001,
                     help='Base unit for depth difference threshold. Final threshold is log(i) * diff_base.')
+parser.add_argument('--use_fgdr_candidates', action='store_true',
+                    help='enable conservative FGDR near/far candidate selection before fusion')
+parser.add_argument('--fgdr_candidate_gate_threshold', type=float, default=0.5,
+                    help='minimum FGDR geometry gate required to consider near/far candidates')
+parser.add_argument('--fgdr_candidate_min_support_gain', type=int, default=1,
+                    help='minimum additional consistent source views required to replace main depth')
 
 parser.add_argument('--outdir', default='./outputs',
                     help='Directory where scan folders with depth/confidence are located.')
-parser.add_argument('--testpath', default='/home/u104754251515/data/dtu_testing',
+parser.add_argument('--testpath', default=DTU_TEST_ROOT,
                     help='Original testing data dir (for camera and pair files).')
 parser.add_argument('--testpath_single_scene', help='testing data path for single scene')
 parser.add_argument('--testlist', default='lists/dtu/test.txt', help='List of scans to process.')
@@ -146,6 +158,118 @@ def batch_reproject_gpu(depth_ref, intrinsics_ref, extrinsics_ref, depths_src, i
     return depth_reproj, xy_reproj[:, 0, :].view(N, H, W), xy_reproj[:, 1, :].view(N, H, W)
 
 
+def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t,
+                                 args, device):
+    num_sources, height, width = src_depths_t.shape
+    if num_sources <= args.s_view:
+        raise ValueError(
+            f"FGDR fusion requires more than s_view={args.s_view} source views, got {num_sources}")
+
+    depth_reproj, x2d, y2d = batch_reproject_gpu(
+        depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t, device)
+
+    y_ref, x_ref = torch.meshgrid(
+        torch.arange(height, device=device),
+        torch.arange(width, device=device),
+        indexing='ij',
+    )
+    dist = torch.sqrt(
+        (x2d - x_ref.unsqueeze(0).float()) ** 2 +
+        (y2d - y_ref.unsqueeze(0).float()) ** 2
+    )
+    depth_diff = torch.abs(depth_reproj - depth_candidate.unsqueeze(0)) / (
+        depth_candidate.unsqueeze(0).abs() + 1e-6)
+
+    geo_mask_sums = []
+    for consistent_views in range(args.s_view, num_sources):
+        depth_threshold = math.log(max(consistent_views, 1.05), 10) * args.diff_base
+        consistency = (
+            (dist < consistent_views * args.dist_base) &
+            (depth_diff < depth_threshold)
+        )
+        geo_mask_sums.append(consistency.sum(dim=0, dtype=torch.int32))
+
+    geo_mask = geo_mask_sums[-1] >= num_sources
+    for support_sum, consistent_views in zip(
+            geo_mask_sums, range(args.s_view, num_sources)):
+        geo_mask = geo_mask | (support_sum >= consistent_views)
+
+    broad_level = num_sources - 1
+    broad_mask = (
+        (dist < broad_level * args.dist_base) &
+        (depth_diff < math.log(max(broad_level, 1.05), 10) * args.diff_base)
+    )
+    support_count = broad_mask.sum(dim=0, dtype=torch.int32)
+    depth_reproj_for_average = depth_reproj.masked_fill(~broad_mask, 0.0)
+    depth_averaged = (
+        depth_reproj_for_average.sum(dim=0) + depth_candidate
+    ) / (support_count.float() + 1.0)
+
+    residual_sum = (depth_diff * broad_mask.float()).sum(dim=0)
+    mean_residual = residual_sum / support_count.clamp(min=1).float()
+    mean_residual = torch.where(
+        support_count > 0,
+        mean_residual,
+        torch.full_like(mean_residual, float('inf')),
+    )
+    return depth_averaged, geo_mask, support_count, mean_residual, x_ref, y_ref
+
+
+def gather_candidate(candidate_stack, candidate_choice):
+    return torch.gather(candidate_stack, 0, candidate_choice.unsqueeze(0)).squeeze(0)
+
+
+def select_fgdr_candidate(support_stack, residual_stack, geo_stack, candidate_depth_stack,
+                          geometry_gate, confidence, args):
+    if support_stack.size(0) < 2:
+        raise ValueError("FGDR candidate selection requires at least one alternative depth")
+
+    best_alt_choice = torch.ones_like(support_stack[0], dtype=torch.long)
+    best_alt_support = support_stack[1]
+    best_alt_residual = residual_stack[1]
+    for candidate_idx in range(2, support_stack.size(0)):
+        candidate_is_better = (
+            (support_stack[candidate_idx] > best_alt_support) |
+            ((support_stack[candidate_idx] == best_alt_support) &
+             (residual_stack[candidate_idx] < best_alt_residual))
+        )
+        best_alt_choice = torch.where(
+            candidate_is_better,
+            torch.full_like(best_alt_choice, candidate_idx),
+            best_alt_choice,
+        )
+        best_alt_support = torch.where(
+            candidate_is_better,
+            support_stack[candidate_idx],
+            best_alt_support,
+        )
+        best_alt_residual = torch.where(
+            candidate_is_better,
+            residual_stack[candidate_idx],
+            best_alt_residual,
+        )
+
+    best_alt_support = gather_candidate(support_stack, best_alt_choice)
+    best_alt_geo = gather_candidate(geo_stack, best_alt_choice)
+    best_alt_depth = gather_candidate(candidate_depth_stack, best_alt_choice)
+
+    switch_mask = (
+        (geometry_gate >= args.fgdr_candidate_gate_threshold) &
+        (confidence <= args.conf_stage) &
+        best_alt_geo &
+        torch.isfinite(best_alt_depth) &
+        (best_alt_depth > 0.0) &
+        (best_alt_support >= (
+            support_stack[0] + args.fgdr_candidate_min_support_gain))
+    )
+    candidate_choice = torch.where(
+        switch_mask,
+        best_alt_choice,
+        torch.zeros_like(best_alt_choice),
+    )
+    return candidate_choice, switch_mask
+
+
 def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, device):
     pair_file = os.path.join(pair_folder, "pair.txt")
     vertexs = []
@@ -186,36 +310,74 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         src_ins_t = torch.stack(src_ins).to(device)
         src_exs_t = torch.stack(src_exs).to(device)
 
-        # 一键调用重投影
-        depth_reproj, x2d, y2d = batch_reproject_gpu(ref_depth_est, ref_in_t, ref_ex_t, src_depths_t, src_ins_t,
-                                                     src_exs_t, device)
+        candidate_choice = None
+        candidate_switch_mask = None
+        if args.use_fgdr_candidates:
+            candidate_paths = {
+                'main': os.path.join(out_folder, 'depth_candidate_main/{:0>8}.pfm'.format(ref_view)),
+                'near': os.path.join(out_folder, 'depth_near/{:0>8}.pfm'.format(ref_view)),
+                'far': os.path.join(out_folder, 'depth_far/{:0>8}.pfm'.format(ref_view)),
+                'gate': os.path.join(out_folder, 'geometry_gate/{:0>8}.pfm'.format(ref_view)),
+            }
+            required_paths = [candidate_paths['near'], candidate_paths['far'], candidate_paths['gate']]
+            missing = [path for path in required_paths if not os.path.isfile(path)]
+            if missing:
+                raise FileNotFoundError(
+                    "FGDR candidate fusion requested, but candidate maps are missing: " + ", ".join(missing))
 
-        y_ref, x_ref = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
-        x_ref_flat = x_ref.unsqueeze(0).float()
-        y_ref_flat = y_ref.unsqueeze(0).float()
+            ref_depth_near = torch.from_numpy(read_pfm(candidate_paths['near'])[0].copy()).to(device)
+            ref_depth_far = torch.from_numpy(read_pfm(candidate_paths['far'])[0].copy()).to(device)
+            geometry_gate = torch.from_numpy(read_pfm(candidate_paths['gate'])[0].copy()).to(device)
+            candidate_depths = [ref_depth_est]
+            if os.path.isfile(candidate_paths['main']):
+                ref_depth_candidate_main = torch.from_numpy(
+                    read_pfm(candidate_paths['main'])[0].copy()).to(device)
+                candidate_depths.append(ref_depth_candidate_main)
+            candidate_depths.extend([ref_depth_near, ref_depth_far])
+            candidate_results = [
+                evaluate_depth_candidate_gpu(
+                    candidate_depth,
+                    ref_in_t,
+                    ref_ex_t,
+                    src_depths_t,
+                    src_ins_t,
+                    src_exs_t,
+                    args,
+                    device,
+                )
+                for candidate_depth in candidate_depths
+            ]
 
-        dist = torch.sqrt((x2d - x_ref_flat) ** 2 + (y2d - y_ref_flat) ** 2)
-        depth_diff = torch.abs(depth_reproj - ref_depth_est.unsqueeze(0)) / (ref_depth_est.unsqueeze(0) + 1e-6)
+            averaged_stack = torch.stack([result[0] for result in candidate_results], dim=0)
+            geo_stack = torch.stack([result[1] for result in candidate_results], dim=0)
+            support_stack = torch.stack([result[2] for result in candidate_results], dim=0)
+            residual_stack = torch.stack([result[3] for result in candidate_results], dim=0)
+            x_ref, y_ref = candidate_results[0][4], candidate_results[0][5]
 
-        geo_mask_sums = torch.zeros((dy_range - args.s_view, H, W), dtype=torch.int32, device=device)
+            candidate_choice, candidate_switch_mask = select_fgdr_candidate(
+                support_stack,
+                residual_stack,
+                geo_stack,
+                torch.stack(candidate_depths, dim=0),
+                geometry_gate,
+                confidence,
+                args,
+            )
+            depth_est_averaged = gather_candidate(averaged_stack, candidate_choice)
+            geo_mask = gather_candidate(geo_stack, candidate_choice)
+        else:
+            depth_est_averaged, geo_mask, _, _, x_ref, y_ref = evaluate_depth_candidate_gpu(
+                ref_depth_est,
+                ref_in_t,
+                ref_ex_t,
+                src_depths_t,
+                src_ins_t,
+                src_exs_t,
+                args,
+                device,
+            )
 
-        # 极速计算各个梯度的容忍掩码
-        for i_idx, i in enumerate(range(args.s_view, dy_range)):
-            thresh_d = math.log(max(i, 1.05), 10) * args.diff_base
-            mask = (dist < i * args.dist_base) & (depth_diff < thresh_d)
-            geo_mask_sums[i_idx] = mask.sum(dim=0, dtype=torch.int32)
-
-        broad_mask = (dist < (dy_range - 1) * args.dist_base) & (
-                    depth_diff < math.log(max(dy_range - 1, 1.05), 10) * args.diff_base)
-        depth_reproj[~broad_mask] = 0.0
-        geo_mask_sum_for_avg = broad_mask.sum(dim=0, dtype=torch.float32)
-
-        depth_est_averaged = (depth_reproj.sum(dim=0) + ref_depth_est) / (geo_mask_sum_for_avg + 1.0)
         depth_est_averaged[confidence > args.conf_stage] = ref_depth_est[confidence > args.conf_stage]
-
-        geo_mask = geo_mask_sums[-1] >= dy_range
-        for i_idx, i in enumerate(range(args.s_view, dy_range)):
-            geo_mask = geo_mask | (geo_mask_sums[i_idx] >= i)
 
         final_mask = photo_mask & geo_mask
 
@@ -268,8 +430,39 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         save_mask(os.path.join(out_folder, "mask/{:0>8}_geo.png".format(ref_view)), geo_mask.cpu().numpy())
         save_mask(os.path.join(out_folder, "mask/{:0>8}_final.png".format(ref_view)), final_mask_np)
 
-        print("processing {}, ref-view{:0>2}, Final Mask Ratio: {:.4f} [⚡ 3D GPU]".format(
-            scan_folder, ref_view, final_mask_np.mean()))
+        candidate_message = ""
+        if candidate_choice is not None:
+            switch_final = candidate_switch_mask & final_mask
+            final_count = final_mask.sum().clamp(min=1).float()
+            switch_ratio = (switch_final.sum().float() / final_count).item()
+            save_mask(
+                os.path.join(out_folder, "mask/{:0>8}_fgdr_switch.png".format(ref_view)),
+                candidate_switch_mask.cpu().numpy(),
+            )
+            choice_scale = 255 // max(len(candidate_depths) - 1, 1)
+            choice_image = (
+                candidate_choice.cpu().numpy().astype(np.uint8) * choice_scale
+            )
+            Image.fromarray(choice_image).save(
+                os.path.join(out_folder, "mask/{:0>8}_fgdr_choice.png".format(ref_view)))
+            if len(candidate_depths) == 4:
+                refined_ratio = (((candidate_choice == 1) & final_mask).sum().float() / final_count).item()
+                near_ratio = (((candidate_choice == 2) & final_mask).sum().float() / final_count).item()
+                far_ratio = (((candidate_choice == 3) & final_mask).sum().float() / final_count).item()
+                candidate_message = (
+                    f", FGDR Switch: {switch_ratio:.4f} "
+                    f"(refined={refined_ratio:.4f}, near={near_ratio:.4f}, far={far_ratio:.4f})"
+                )
+            else:
+                near_ratio = (((candidate_choice == 1) & final_mask).sum().float() / final_count).item()
+                far_ratio = (((candidate_choice == 2) & final_mask).sum().float() / final_count).item()
+                candidate_message = (
+                    f", FGDR Switch: {switch_ratio:.4f} "
+                    f"(near={near_ratio:.4f}, far={far_ratio:.4f})"
+                )
+
+        print("processing {}, ref-view{:0>2}, Final Mask Ratio: {:.4f}{} [⚡ 3D GPU]".format(
+            scan_folder, ref_view, final_mask_np.mean(), candidate_message))
 
     # 循环遍历所有视角结束，将显存里所有的点一次性打包给 CPU 硬盘
     if len(vertexs) > 0:
