@@ -8,8 +8,10 @@ fi
 TAG="$1"
 shift
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON="${PYTHON:-/home/u104754251515/miniconda3/bin/python}"
-TRAIN_DIR="$ROOT/checkpoints/$TAG"
+SHARED_ROOT="${R2MVSNET_SHARED_ROOT:-/root/shared-nvme}"
+EXPERIMENT_ROOT="${R2MVSNET_EXPERIMENT_ROOT:-$SHARED_ROOT/experiments/R2-MVSNet}"
+PYTHON="${PYTHON:-/root/envs/r2mvsnet/bin/python}"
+TRAIN_DIR="$EXPERIMENT_ROOT/checkpoints/$TAG"
 LOG_DIR="$TRAIN_DIR/logs"
 mkdir -p "$LOG_DIR"
 CMD=("$PYTHON" "$ROOT/train.py" --logdir "$TRAIN_DIR" "$@")

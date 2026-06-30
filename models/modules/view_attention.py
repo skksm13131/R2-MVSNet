@@ -62,11 +62,13 @@ class SinglePassReliabilityWeightedViewAttention(nn.Module):
     supports_confidence_guidance = True
 
     def __init__(self, channels, min_hidden_channels=8, max_weight_delta=0.35, confidence_floor=0.35,
-                 use_feature_reliability=False, adaptive_difficulty=False):
+                 use_feature_reliability=False, adaptive_difficulty=False, use_edge_view_weight=False,
+                 max_edge_score_scale=0.25):
         super().__init__()
         hidden_channels = max(min_hidden_channels, channels // 4)
         self.use_feature_reliability = use_feature_reliability
         self.adaptive_difficulty = adaptive_difficulty
+        self.use_edge_view_weight = use_edge_view_weight
         in_channels = channels * 3 + 2 + (2 if self.use_feature_reliability else 0)
         self.score_net = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=False),
@@ -82,11 +84,15 @@ class SinglePassReliabilityWeightedViewAttention(nn.Module):
         if self.adaptive_difficulty:
             self.difficulty_temperature = nn.Parameter(torch.tensor(1.0))
             self.difficulty_bias = nn.Parameter(torch.tensor(-0.2))
+        if self.use_edge_view_weight:
+            self.edge_score_scale_logit = nn.Parameter(torch.tensor(0.0))
+            self.max_edge_score_scale = max_edge_score_scale
         self.max_weight_delta = max_weight_delta
         self.confidence_floor = confidence_floor
         nn.init.constant_(self.score_net[-1].bias, 0.0)
 
-    def score_volume(self, ref_feature, warped_volume, ref_reliability=None, src_reliability=None):
+    def score_volume(self, ref_feature, warped_volume, ref_reliability=None, src_reliability=None,
+                     ref_edge=None, warped_edge_volume=None):
         ref_volume = ref_feature.unsqueeze(2)
         corr = (warped_volume * ref_volume).mean(dim=1)
         best_corr = corr.max(dim=1, keepdim=True).values
@@ -102,7 +108,37 @@ class SinglePassReliabilityWeightedViewAttention(nn.Module):
                 src_reliability = ref_reliability.new_full(ref_reliability.shape, 0.5)
             score_inputs.extend([ref_reliability.to(ref_feature.dtype), src_reliability.to(ref_feature.dtype)])
         score_input = torch.cat(score_inputs, dim=1)
-        return self.score_net(score_input)
+        raw_score = self.score_net(score_input)
+
+        if self.use_edge_view_weight and ref_edge is not None and warped_edge_volume is not None:
+            best_depth_index = corr.detach().argmax(dim=1)
+            gather_index = best_depth_index.unsqueeze(1).unsqueeze(2).expand(
+                -1,
+                warped_edge_volume.size(1),
+                1,
+                -1,
+                -1,
+            )
+            src_edge = torch.gather(warped_edge_volume, 2, gather_index).squeeze(2)
+
+            ref_strength = ref_edge[:, 0:1].clamp(min=0.0, max=1.0)
+            src_strength = src_edge[:, 0:1].clamp(min=0.0, max=1.0)
+            ref_direction = F.normalize(ref_edge[:, 1:3], dim=1, eps=1e-6)
+            src_direction = F.normalize(src_edge[:, 1:3], dim=1, eps=1e-6)
+            ref_confidence = ref_edge[:, 3:4].clamp(min=0.0, max=1.0)
+            src_confidence = src_edge[:, 3:4].clamp(min=0.0, max=1.0)
+
+            strength_agreement = (1.0 - (ref_strength - src_strength).abs()).clamp(min=0.0, max=1.0)
+            orientation_agreement = (
+                1.0 + (ref_direction * src_direction).sum(dim=1, keepdim=True)
+            ).mul(0.5).clamp(min=0.0, max=1.0)
+            edge_mask = torch.maximum(ref_strength, src_strength) * ref_confidence * src_confidence
+            edge_agreement = strength_agreement * orientation_agreement
+            edge_score = edge_mask * (2.0 * edge_agreement - 1.0)
+            edge_score_scale = torch.sigmoid(self.edge_score_scale_logit) * self.max_edge_score_scale
+            raw_score = raw_score + edge_score_scale * edge_score
+
+        return raw_score
 
     def score_to_weight(self, raw_score, prev_confidence=None, feature_reliability=None):
         residual_ratio = torch.sigmoid(self.residual_scale_logit) * self.max_weight_delta

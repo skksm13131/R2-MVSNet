@@ -20,14 +20,20 @@ import torch.distributed as dist
 
 cudnn.benchmark = True
 
+SHARED_ROOT = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
+DTU_TRAIN_ROOT = os.environ.get(
+    "R2MVSNET_DTU_TRAIN_PATH",
+    os.path.join(SHARED_ROOT, "datasets", "dtu"),
+)
+
 parser = argparse.ArgumentParser(description='A PyTorch Implementation of Cascade Cost Volume MVSNet')
 parser.add_argument('--mode', default='train', help='train or test', choices=['train', 'test', 'profile'])
 parser.add_argument('--model', default='mvsnet', help='select model')
 parser.add_argument('--device', default='cuda', help='select model')
 
 parser.add_argument('--dataset', default='dtu_yao', help='select dataset')
-parser.add_argument('--trainpath', default='/home/u104754251515/data/mvs_training/dtu', help='train datapath')
-parser.add_argument('--testpath', default='/home/u104754251515/data/mvs_training/dtu', help='test datapath')
+parser.add_argument('--trainpath', default=DTU_TRAIN_ROOT, help='train datapath')
+parser.add_argument('--testpath', default=DTU_TRAIN_ROOT, help='validation/test datapath')
 parser.add_argument('--trainlist', default='lists/dtu/train.txt', help='train list')
 parser.add_argument('--testlist', default='lists/dtu/test.txt', help='test list')
 
@@ -85,6 +91,14 @@ parser.add_argument('--cadr_confidence_mix', type=float, default=0.5, help='CADR
 parser.add_argument('--use_rmfe', action='store_true', help='enable RMFE learnable multi-scale feature enhancement')
 parser.add_argument('--use_rafe', action='store_true', help='enable reliability-aware feature extraction')
 parser.add_argument('--use_adaptive_r2', action='store_true', help='enable difficulty-adaptive RAFE and SP-RWCV gating')
+parser.add_argument('--use_edge_feature', action='store_true', help='enable edge-aware feature extraction at all cascade stages')
+parser.add_argument('--use_edge_view_weight', action='store_true', help='use cross-view edge consistency in SP-RWCV')
+parser.add_argument('--use_fgdr', action='store_true', help='enable progressive fusion-guided depth refinement')
+parser.add_argument('--fgdr_max_radius_factor', type=float, default=2.0, help='maximum FGDR candidate radius in local depth intervals')
+parser.add_argument('--fgdr_anchor_base', action='store_true', help='keep original R2 depth as the cascade/fusion anchor')
+parser.add_argument('--fgdr_loss_weight', type=float, default=0.05, help='FGDR cover/radius loss weight')
+parser.add_argument('--fgdr_radius_weight', type=float, default=0.1, help='FGDR high-confidence radius regularization weight')
+parser.add_argument('--fgdr_center_weight', type=float, default=0.25, help='FGDR candidate-center supervision weight')
 parser.add_argument('--use_ugdr', action='store_true', help='enable UGDR final-stage bounded depth refinement')
 parser.add_argument('--ugdr_max_residual_ratio', type=float, default=0.5, help='UGDR maximum residual as a ratio of final-stage interval')
 
@@ -171,7 +185,8 @@ def train(model, model_loss, optimizer, TrainImgLoader, TestImgLoader, start_epo
         # 【核心修改】新增了鲁棒指标到 CSV 表头
         csv_header = [
             'epoch', 'lr', 'train_loss', 'train_depth_loss', 'train_abs_depth_error',
-            'test_loss', 'test_depth_loss',
+            'train_fgdr_loss',
+            'test_loss', 'test_depth_loss', 'test_fgdr_loss',
             'test_abs_depth_error', 'test_thres2mm_error',
             'test_trimmed_mae_90', 'test_trimmed_mae_80',  # 新增：截断误差（越低越好，代表有效点云精度）
             'test_out_ratio_2mm', 'test_out_ratio_4mm'  # 新增：坏点比例（越低越好）
@@ -318,7 +333,15 @@ def train_sample(model, model_loss, optimizer, sample, args):
     outputs = model(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"])
     depth_est = outputs["depth"]
 
-    total_loss, depth_loss, normal_loss, dndr_loss = unpack_model_loss(model_loss(outputs, depth_gt_ms, mask_ms, dlossw=[float(e) for e in args.dlossw.split(",") if e]))
+    total_loss, depth_loss, normal_loss, fgdr_loss = unpack_model_loss(model_loss(
+        outputs,
+        depth_gt_ms,
+        mask_ms,
+        dlossw=[float(e) for e in args.dlossw.split(",") if e],
+        fgdr_loss_weight=args.fgdr_loss_weight if args.use_fgdr else 0.0,
+        fgdr_radius_weight=args.fgdr_radius_weight,
+        fgdr_center_weight=args.fgdr_center_weight,
+    ))
 
     if is_distributed and args.using_apex:
         with amp.scale_loss(total_loss, optimizer) as scaled_loss:
@@ -331,7 +354,7 @@ def train_sample(model, model_loss, optimizer, sample, args):
     scalar_outputs = {"loss": total_loss,
                       "depth_loss": depth_loss,
                       "normal_loss": normal_loss,
-                      "dndr_loss": dndr_loss,
+                      "fgdr_loss": fgdr_loss,
                       "abs_depth_error": AbsDepthError_metrics(depth_est, depth_gt, mask > 0.5)}
 
     image_outputs = {"depth_est": depth_est * mask,
@@ -366,7 +389,15 @@ def test_sample_depth(model, model_loss, sample, args):
     outputs = model_eval(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"])
     depth_est = outputs["depth"]
 
-    total_loss, depth_loss, normal_loss, dndr_loss = unpack_model_loss(model_loss(outputs, depth_gt_ms, mask_ms, dlossw=[float(e) for e in args.dlossw.split(",") if e]))
+    total_loss, depth_loss, normal_loss, fgdr_loss = unpack_model_loss(model_loss(
+        outputs,
+        depth_gt_ms,
+        mask_ms,
+        dlossw=[float(e) for e in args.dlossw.split(",") if e],
+        fgdr_loss_weight=args.fgdr_loss_weight if args.use_fgdr else 0.0,
+        fgdr_radius_weight=args.fgdr_radius_weight,
+        fgdr_center_weight=args.fgdr_center_weight,
+    ))
 
     # ===============================================================================
     # 【核心修改】计算鲁棒性指标
@@ -376,7 +407,7 @@ def test_sample_depth(model, model_loss, sample, args):
     scalar_outputs = {"loss": total_loss,
                       "depth_loss": depth_loss,
                       "normal_loss": normal_loss,
-                      "dndr_loss": dndr_loss,
+                      "fgdr_loss": fgdr_loss,
                       "abs_depth_error": AbsDepthError_metrics(depth_est, depth_gt, mask > 0.5),
                       "thres2mm_error": Thres_metrics(depth_est, depth_gt, mask > 0.5, 2),
                       # 新增的指标
@@ -484,7 +515,12 @@ if __name__ == '__main__':
                           use_view_attention=args.use_view_attention,
                           view_attention_mode=args.view_attention_mode,
                           use_rafe=args.use_rafe,
-                          use_adaptive_r2=args.use_adaptive_r2)
+                          use_adaptive_r2=args.use_adaptive_r2,
+                          use_edge_feature=args.use_edge_feature,
+                          use_edge_view_weight=args.use_edge_view_weight,
+                          use_fgdr=args.use_fgdr,
+                          fgdr_max_radius_factor=args.fgdr_max_radius_factor,
+                          fgdr_anchor_base=args.fgdr_anchor_base)
     model.to(device)
     model_loss = cas_mvsnet_loss
 

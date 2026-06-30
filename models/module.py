@@ -749,9 +749,72 @@ class ReliabilityAwareFeatureAdapter(nn.Module):
         return enhanced_feature, reliability
 
 
+class EdgeAwareFeatureBlock(nn.Module):
+    """Extract compact edge geometry and optionally refine pyramid features."""
+
+    def __init__(self, channels, prior_channels=3, min_hidden_channels=4):
+        super(EdgeAwareFeatureBlock, self).__init__()
+        hidden_channels = max(min_hidden_channels, channels // 4)
+        input_channels = channels + prior_channels
+        self.local_branch = nn.Sequential(
+            nn.Conv2d(input_channels, hidden_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.context_branch = nn.Sequential(
+            nn.Conv2d(input_channels, hidden_channels, 3, padding=2, dilation=2, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.fusion = nn.Sequential(
+            nn.Conv2d(hidden_channels * 2, hidden_channels, 1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        # strength, direction residual (x/y), confidence
+        self.edge_head = nn.Conv2d(hidden_channels, 4, 1, bias=True)
+        self.residual_proj = nn.Conv2d(hidden_channels, channels, 1, bias=False)
+        self.residual_scale_logit = nn.Parameter(torch.tensor(-2.2))
+
+        nn.init.constant_(self.edge_head.bias, 0.0)
+        # Start exactly from the original FeatureNet path.
+        nn.init.constant_(self.residual_proj.weight, 0.0)
+
+    def forward(self, feature, edge_prior, enhance=True):
+        edge_prior = F.interpolate(
+            edge_prior,
+            size=feature.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        block_input = torch.cat([feature, edge_prior], dim=1)
+        fused = self.fusion(torch.cat([
+            self.local_branch(block_input),
+            self.context_branch(block_input),
+        ], dim=1))
+
+        raw_edge = self.edge_head(fused)
+        strength = torch.sigmoid(raw_edge[:, 0:1] + edge_prior[:, 2:3])
+        prior_direction = edge_prior[:, 0:2]
+        prior_direction = F.normalize(prior_direction, dim=1, eps=1e-6)
+        direction = F.normalize(
+            torch.tanh(raw_edge[:, 1:3]) + prior_direction,
+            dim=1,
+            eps=1e-6,
+        )
+        confidence = torch.sigmoid(raw_edge[:, 3:4])
+        edge_geometry = torch.cat([strength, direction, confidence], dim=1)
+
+        if enhance:
+            residual_scale = torch.sigmoid(self.residual_scale_logit)
+            edge_gate = strength * confidence
+            feature = feature + residual_scale * edge_gate * self.residual_proj(fused)
+        return feature, edge_geometry
+
+
 class FeatureNet(nn.Module):
     def __init__(self, base_channels, num_stage=3, stride=4, arch_mode="unet", use_rafe=False,
-                 use_adaptive_r2=False):
+                 use_adaptive_r2=False, use_edge_feature=False, use_edge_view_weight=False):
         super(FeatureNet, self).__init__()
         assert arch_mode in ["unet", "fpn"], print("mode must be in 'unet' or 'fpn', but get:{}".format(arch_mode))
         print("*************feature extraction arch mode:{}****************".format(arch_mode))
@@ -761,10 +824,15 @@ class FeatureNet(nn.Module):
         self.num_stage = num_stage
         self.use_rafe = use_rafe
         self.use_adaptive_r2 = use_adaptive_r2
+        self.use_edge_feature = use_edge_feature
+        self.use_edge_view_weight = use_edge_view_weight
+        self.use_edge_branch = self.use_edge_feature or self.use_edge_view_weight
         if self.use_rafe:
             print("*************RAFE reliability-aware feature extraction enabled****************")
             if self.use_adaptive_r2:
                 print("*************Adaptive R2 difficulty gating enabled in RAFE****************")
+        if self.use_edge_branch:
+            print("*************Edge-aware feature extraction enabled at stage1/2/3****************")
 
         self.conv0 = nn.Sequential(
             Conv2d(3, base_channels, 3, 1, padding=1),
@@ -803,6 +871,12 @@ class FeatureNet(nn.Module):
                 "stage2": ReliabilityAwareFeatureAdapter(base_channels * 2, adaptive_difficulty=self.use_adaptive_r2),
                 "stage3": ReliabilityAwareFeatureAdapter(base_channels, adaptive_difficulty=self.use_adaptive_r2),
             })
+        if self.use_edge_branch:
+            self.edge_blocks = nn.ModuleDict({
+                "stage1": EdgeAwareFeatureBlock(base_channels * 4),
+                "stage2": EdgeAwareFeatureBlock(base_channels * 2),
+                "stage3": EdgeAwareFeatureBlock(base_channels),
+            })
 
     def _normalize_prior_channel(self, x):
         mean = x.mean(dim=[2, 3], keepdim=True)
@@ -833,6 +907,17 @@ class FeatureNet(nn.Module):
             y_coord,
         ], dim=1)
 
+    def build_edge_prior(self, x):
+        gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+        grad_x = F.pad(gray[:, :, :, 1:] - gray[:, :, :, :-1], (0, 1, 0, 0))
+        grad_y = F.pad(gray[:, :, 1:, :] - gray[:, :, :-1, :], (0, 0, 0, 1))
+        grad_mag = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-6)
+        grad_scale = grad_mag.mean(dim=[2, 3], keepdim=True).clamp(min=1e-4)
+        grad_x = torch.tanh(grad_x / grad_scale)
+        grad_y = torch.tanh(grad_y / grad_scale)
+        grad_mag = torch.tanh(grad_mag / grad_scale)
+        return torch.cat([grad_x, grad_y, grad_mag], dim=1)
+
     def inject_reliability_feature(self, stage_name, feature, structure_prior, parent_reliability=None):
         if not self.use_rafe:
             return feature, None
@@ -840,6 +925,7 @@ class FeatureNet(nn.Module):
 
     def forward(self, x):
         structure_prior = self.build_structure_prior(x) if self.use_rafe else None
+        edge_prior = self.build_edge_prior(x) if self.use_edge_branch else None
         conv0 = self.conv0(x)
         conv1 = self.conv1(conv0)
         conv2 = self.conv2(conv1)
@@ -848,25 +934,49 @@ class FeatureNet(nn.Module):
         outputs = {}
         out = self.out1(intra_feat)
         out, reliability = self.inject_reliability_feature("stage1", out, structure_prior)
+        if self.use_edge_branch:
+            out, edge_geometry = self.edge_blocks["stage1"](
+                out,
+                edge_prior,
+                enhance=self.use_edge_feature,
+            )
         outputs["stage1"] = out
         if reliability is not None:
             outputs["stage1_reliability"] = reliability
+        if self.use_edge_branch:
+            outputs["stage1_edge"] = edge_geometry
        
         if self.arch_mode == "fpn":
             if self.num_stage == 3:
                 intra_feat = F.interpolate(intra_feat, scale_factor=2, mode="nearest") + self.inner1(conv1)
                 out = self.out2(intra_feat)
                 out, reliability = self.inject_reliability_feature("stage2", out, structure_prior, reliability)
+                if self.use_edge_branch:
+                    out, edge_geometry = self.edge_blocks["stage2"](
+                        out,
+                        edge_prior,
+                        enhance=self.use_edge_feature,
+                    )
                 outputs["stage2"] = out
                 if reliability is not None:
                     outputs["stage2_reliability"] = reliability
+                if self.use_edge_branch:
+                    outputs["stage2_edge"] = edge_geometry
 
                 intra_feat = F.interpolate(intra_feat, scale_factor=2, mode="nearest") + self.inner2(conv0)
                 out = self.out3(intra_feat)
                 out, reliability = self.inject_reliability_feature("stage3", out, structure_prior, reliability)
+                if self.use_edge_branch:
+                    out, edge_geometry = self.edge_blocks["stage3"](
+                        out,
+                        edge_prior,
+                        enhance=self.use_edge_feature,
+                    )
                 outputs["stage3"] = out
                 if reliability is not None:
                     outputs["stage3_reliability"] = reliability
+                if self.use_edge_branch:
+                    outputs["stage3_edge"] = edge_geometry
 
         return outputs
 
@@ -918,6 +1028,75 @@ class RefineNet(nn.Module):
         return depth_refined
 
 
+class FusionGuidedDepthRefinement(nn.Module):
+    def __init__(self, in_channels, hidden_channels=16, max_radius_factor=2.0):
+        super(FusionGuidedDepthRefinement, self).__init__()
+        self.max_radius_factor = max_radius_factor
+        self.context = nn.Sequential(
+            ConvBnReLU(in_channels + 4, hidden_channels),
+            ConvBnReLU(hidden_channels, hidden_channels),
+        )
+        self.residual_head = nn.Conv2d(hidden_channels, 1, 3, padding=1)
+        self.radius_head = nn.Conv2d(hidden_channels, 1, 3, padding=1)
+        self.gate_head = nn.Conv2d(hidden_channels, 1, 3, padding=1)
+
+    def forward(self, ref_feature, depth, depth_values, confidence,
+                ref_reliability=None, view_weights=None):
+        depth_min = depth_values.min(dim=1)[0]
+        depth_max = depth_values.max(dim=1)[0]
+        depth_span = (depth_max - depth_min).clamp(min=1e-6)
+        if depth_values.size(1) > 1:
+            depth_interval = (depth_values[:, 1:] - depth_values[:, :-1]).abs().mean(dim=1)
+        else:
+            depth_interval = depth_span
+
+        depth_norm = ((depth - depth_min) / depth_span).clamp(0.0, 1.0).unsqueeze(1)
+        confidence = confidence.unsqueeze(1).clamp(0.0, 1.0)
+
+        if ref_reliability is None:
+            ref_reliability = ref_feature.new_ones(depth_norm.shape)
+        elif ref_reliability.shape[-2:] != ref_feature.shape[-2:]:
+            ref_reliability = F.interpolate(
+                ref_reliability,
+                size=ref_feature.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if view_weights is None:
+            view_uncertainty = ref_feature.new_zeros(depth_norm.shape)
+        else:
+            if view_weights.shape[-2:] != ref_feature.shape[-2:]:
+                view_weights = F.interpolate(view_weights, size=ref_feature.shape[-2:], mode="nearest")
+            view_mean = view_weights.mean(dim=1, keepdim=True)
+            view_uncertainty = view_weights.std(dim=1, keepdim=True, unbiased=False) / (view_mean.abs() + 1e-6)
+            view_uncertainty = view_uncertainty.clamp(0.0, 1.0)
+
+        fgdr_input = torch.cat([ref_feature, depth_norm, confidence, ref_reliability, view_uncertainty], dim=1)
+        context = self.context(fgdr_input)
+        geometry_gate = torch.sigmoid(self.gate_head(context))
+        uncertainty = torch.sigmoid(self.radius_head(context))
+
+        max_radius = depth_interval.unsqueeze(1) * self.max_radius_factor
+        delta = (0.25 + 0.75 * uncertainty * geometry_gate) * max_radius
+        residual = torch.tanh(self.residual_head(context)) * delta * geometry_gate
+
+        depth_main = (depth.unsqueeze(1) + residual).squeeze(1)
+        depth_near = (depth_main.unsqueeze(1) - delta).squeeze(1)
+        depth_far = (depth_main.unsqueeze(1) + delta).squeeze(1)
+
+        return {
+            "depth": depth_main,
+            "fgdr_depth_base": depth,
+            "fgdr_depth_main": depth_main,
+            "fgdr_depth_near": depth_near,
+            "fgdr_depth_far": depth_far,
+            "fgdr_delta": delta.squeeze(1),
+            "fgdr_geometry_gate": geometry_gate.squeeze(1),
+            "fgdr_uncertainty": uncertainty.squeeze(1),
+        }
+
+
 def depth_regression(p, depth_values):
     if depth_values.dim() <= 2:
         # print("regression dim <= 2")
@@ -928,8 +1107,12 @@ def depth_regression(p, depth_values):
 
 def cas_mvsnet_loss(inputs, depth_gt_ms, mask_ms, **kwargs):
     depth_loss_weights = kwargs.get("dlossw", None)
+    fgdr_loss_weight = kwargs.get("fgdr_loss_weight", 0.0)
+    fgdr_radius_weight = kwargs.get("fgdr_radius_weight", 0.1)
+    fgdr_center_weight = kwargs.get("fgdr_center_weight", 0.25)
 
     total_loss = torch.tensor(0.0, dtype=torch.float32, device=mask_ms["stage1"].device, requires_grad=False)
+    fgdr_loss = torch.tensor(0.0, dtype=torch.float32, device=mask_ms["stage1"].device, requires_grad=False)
 
     for (stage_inputs, stage_key) in [(inputs[k], k) for k in inputs.keys() if "stage" in k]:
         depth_est = stage_inputs["depth"]
@@ -945,7 +1128,43 @@ def cas_mvsnet_loss(inputs, depth_gt_ms, mask_ms, **kwargs):
         else:
             total_loss += 1.0 * depth_loss
 
-    return total_loss, depth_loss
+        if fgdr_loss_weight > 0.0 and "fgdr_depth_near" in stage_inputs and "fgdr_depth_far" in stage_inputs:
+            depth_near = stage_inputs["fgdr_depth_near"]
+            depth_far = stage_inputs["fgdr_depth_far"]
+            delta = stage_inputs["fgdr_delta"]
+            gate = stage_inputs["fgdr_geometry_gate"]
+            confidence = stage_inputs.get("photometric_confidence", None)
+            if confidence is None:
+                confidence = depth_est.new_ones(depth_est.shape)
+            cover_loss = F.smooth_l1_loss(
+                F.relu(depth_near[mask] - depth_gt[mask]) + F.relu(depth_gt[mask] - depth_far[mask]),
+                torch.zeros_like(depth_gt[mask]),
+                reduction='mean',
+            )
+            high_confidence_radius = F.smooth_l1_loss(
+                (confidence[mask].detach() * gate[mask] * delta[mask]),
+                torch.zeros_like(delta[mask]),
+                reduction='mean',
+            )
+            candidate_center = stage_inputs.get("fgdr_depth_main", stage_inputs["depth"])
+            candidate_center_loss = F.smooth_l1_loss(
+                candidate_center[mask],
+                depth_gt[mask],
+                reduction='mean',
+            )
+            stage_fgdr_loss = (
+                cover_loss +
+                fgdr_center_weight * candidate_center_loss +
+                fgdr_radius_weight * high_confidence_radius
+            )
+            fgdr_loss = fgdr_loss + stage_fgdr_loss
+            if depth_loss_weights is not None:
+                stage_idx = int(stage_key.replace("stage", "")) - 1
+                total_loss += depth_loss_weights[stage_idx] * fgdr_loss_weight * stage_fgdr_loss
+            else:
+                total_loss += fgdr_loss_weight * stage_fgdr_loss
+
+    return total_loss, depth_loss, total_loss.new_tensor(0.0), fgdr_loss
 
 
 def get_cur_depth_range_samples(cur_depth, ndepth, depth_inteval_pixel, shape, max_depth=192.0, min_depth=0.0):

@@ -118,8 +118,13 @@ def evaluate_scan(scan_id, args):
 
 
 if __name__ == "__main__":
+    shared_root = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
+    dtu_eval_root = os.environ.get(
+        "R2MVSNET_DTU_EVAL_PATH",
+        os.path.join(shared_root, "SampleSet", "MVS Data"),
+    )
     parser = argparse.ArgumentParser(description="DTU Evaluation Script")
-    parser.add_argument("--dataPath", type=str, default="/home/u104754251515/data/MVS Data")
+    parser.add_argument("--dataPath", type=str, default=dtu_eval_root)
     parser.add_argument("--plyPath", type=str, default="./outputs/")
     parser.add_argument("--resultPath", type=str, default="./results_m/")
     parser.add_argument("--dst", type=float, default=0.2, help="Voxel down-sample size (mm)")

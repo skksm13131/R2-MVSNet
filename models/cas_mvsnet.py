@@ -18,7 +18,7 @@ class DepthNet(nn.Module):
 
     def forward(self, features, proj_matrices, depth_values, num_depth, cost_regularization,
                 prob_volume_init=None, view_attention=None, prev_view_weights=None, prev_confidence=None,
-                feature_reliabilities=None):
+                feature_reliabilities=None, edge_features=None):
         proj_matrices = torch.unbind(proj_matrices, 1)
         assert len(features) == len(proj_matrices)
         num_views = len(features)
@@ -27,6 +27,8 @@ class DepthNet(nn.Module):
         src_features = features[1:]
         ref_feature_reliability = feature_reliabilities[0] if feature_reliabilities is not None else None
         src_feature_reliabilities = feature_reliabilities[1:] if feature_reliabilities is not None else [None] * len(src_features)
+        ref_edge = edge_features[0] if edge_features is not None else None
+        src_edges = edge_features[1:] if edge_features is not None else [None] * len(src_features)
         ref_proj = proj_matrices[0]
         src_projs = proj_matrices[1:]
 
@@ -51,19 +53,25 @@ class DepthNet(nn.Module):
         elif getattr(view_attention, 'uses_single_pass_weighted_variance', False):
             src_weights = []
             total_weight = ref_feature.new_ones(ref_feature.size(0), 1, 1, ref_feature.size(2), ref_feature.size(3))
-            for src_fea, src_proj, src_feature_reliability in zip(src_features, src_projs, src_feature_reliabilities):
+            for src_fea, src_proj, src_feature_reliability, src_edge in zip(
+                    src_features, src_projs, src_feature_reliabilities, src_edges):
                 src_proj_new = self._compose_proj(src_proj)
                 warped_volume = homo_warping(src_fea, src_proj_new, ref_proj_new, depth_values)
                 warped_feature_reliability = None
+                warped_edge_volume = None
                 src_reliability_score = None
                 if getattr(view_attention, 'use_feature_reliability', False) and src_feature_reliability is not None:
                     warped_feature_reliability = homo_warping(src_feature_reliability, src_proj_new, ref_proj_new, depth_values)
                     src_reliability_score = warped_feature_reliability.mean(dim=2)
+                if getattr(view_attention, 'use_edge_view_weight', False) and src_edge is not None:
+                    warped_edge_volume = homo_warping(src_edge, src_proj_new, ref_proj_new, depth_values)
                 raw_score = view_attention.score_volume(
                     ref_feature,
                     warped_volume,
                     ref_reliability=ref_feature_reliability,
                     src_reliability=src_reliability_score,
+                    ref_edge=ref_edge,
+                    warped_edge_volume=warped_edge_volume,
                 )
                 weight = view_attention.score_to_weight(
                     raw_score,
@@ -78,6 +86,8 @@ class DepthNet(nn.Module):
                 del warped_volume
                 if warped_feature_reliability is not None:
                     del warped_feature_reliability
+                if warped_edge_volume is not None:
+                    del warped_edge_volume
             volume_mean = volume_sum / total_weight
             volume_variance = volume_sq_sum / total_weight - volume_mean.pow(2)
             src_weights = torch.cat(src_weights, dim=1) if src_weights else None
@@ -172,7 +182,9 @@ class DepthNet(nn.Module):
 class CascadeMVSNet(nn.Module):
     def __init__(self, refine=False, ndepths=[48, 32, 8], depth_interals_ratio=[4, 2, 1], share_cr=False,
                  grad_method='detach', arch_mode='fpn', cr_base_chs=[8, 8, 8], use_view_attention=False,
-                 view_attention_mode='legacy', use_rafe=False, use_adaptive_r2=False):
+                 view_attention_mode='legacy', use_rafe=False, use_adaptive_r2=False,
+                 use_fgdr=False, fgdr_max_radius_factor=2.0, fgdr_anchor_base=False,
+                 use_edge_feature=False, use_edge_view_weight=False):
         super(CascadeMVSNet, self).__init__()
         self.refine = refine
         self.share_cr = share_cr
@@ -186,8 +198,16 @@ class CascadeMVSNet(nn.Module):
         self.view_attention_mode = view_attention_mode
         self.use_rafe = use_rafe
         self.use_adaptive_r2 = use_adaptive_r2
-        print('**********netphs:{}, depth_intervals_ratio:{},  grad:{}, chs:{}, view_attention:{}, mode:{}, rafe:{}, adaptive_r2:{}************'.format(
-              ndepths, depth_interals_ratio, self.grad_method, self.cr_base_chs, use_view_attention, view_attention_mode, use_rafe, use_adaptive_r2))
+        self.use_fgdr = use_fgdr
+        self.fgdr_max_radius_factor = fgdr_max_radius_factor
+        self.fgdr_anchor_base = fgdr_anchor_base
+        self.use_edge_feature = use_edge_feature
+        self.use_edge_view_weight = use_edge_view_weight
+        if self.use_edge_view_weight and (
+                not self.use_view_attention or self.view_attention_mode != 'single_pass_reliability_weighted'):
+            raise ValueError('edge-view weighting requires single_pass_reliability_weighted view attention')
+        print('**********netphs:{}, depth_intervals_ratio:{}, grad:{}, chs:{}, view_attention:{}, mode:{}, rafe:{}, adaptive_r2:{}, fgdr:{}, fgdr_anchor_base:{}, edge_feature:{}, edge_view_weight:{}************'.format(
+              ndepths, depth_interals_ratio, self.grad_method, self.cr_base_chs, use_view_attention, view_attention_mode, use_rafe, use_adaptive_r2, use_fgdr, fgdr_anchor_base, use_edge_feature, use_edge_view_weight))
 
         assert len(ndepths) == len(depth_interals_ratio)
 
@@ -199,7 +219,9 @@ class CascadeMVSNet(nn.Module):
 
         self.feature = FeatureNet(base_channels=8, stride=4, num_stage=self.num_stage,
                                   arch_mode=self.arch_mode, use_rafe=self.use_rafe,
-                                  use_adaptive_r2=self.use_adaptive_r2)
+                                  use_adaptive_r2=self.use_adaptive_r2,
+                                  use_edge_feature=self.use_edge_feature,
+                                  use_edge_view_weight=self.use_edge_view_weight)
 
         if self.share_cr:
             self.cost_regularization = CostRegNet(in_channels=self.feature.out_channels, base_channels=8)
@@ -211,6 +233,13 @@ class CascadeMVSNet(nn.Module):
 
         if self.refine:
             self.refine_network = RefineNet()
+
+        if self.use_fgdr:
+            self.fgdr_modules = nn.ModuleList([
+                FusionGuidedDepthRefinement(ch, hidden_channels=max(8, ch // 2),
+                                            max_radius_factor=self.fgdr_max_radius_factor)
+                for ch in self.feature.out_channels
+            ])
 
         self.DepthNet = DepthNet()
         if self.use_view_attention:
@@ -236,6 +265,7 @@ class CascadeMVSNet(nn.Module):
                         max_weight_delta=0.25 if idx == 0 else 0.35,
                         use_feature_reliability=self.use_rafe,
                         adaptive_difficulty=self.use_adaptive_r2,
+                        use_edge_view_weight=self.use_edge_view_weight,
                     )
                     for idx, ch in enumerate(self.feature.out_channels)
                 ])
@@ -263,6 +293,10 @@ class CascadeMVSNet(nn.Module):
             reliability_key = 'stage{}_reliability'.format(stage_idx + 1)
             if self.use_rafe and all(reliability_key in feat for feat in features):
                 feature_reliabilities_stage = [feat[reliability_key] for feat in features]
+            edge_features_stage = None
+            edge_key = 'stage{}_edge'.format(stage_idx + 1)
+            if self.use_edge_view_weight and all(edge_key in feat for feat in features):
+                edge_features_stage = [feat[edge_key] for feat in features]
             proj_matrices_stage = proj_matrices['stage{}'.format(stage_idx + 1)]
             stage_scale = self.stage_infos['stage{}'.format(stage_idx + 1)]['scale']
 
@@ -327,7 +361,28 @@ class CascadeMVSNet(nn.Module):
                 prev_view_weights=stage_prev_view_weights,
                 prev_confidence=stage_prev_confidence,
                 feature_reliabilities=feature_reliabilities_stage,
+                edge_features=edge_features_stage,
             )
+
+            if self.use_fgdr and stage_idx < len(self.fgdr_modules):
+                base_depth = outputs_stage['depth']
+                ref_reliability = feature_reliabilities_stage[0] if feature_reliabilities_stage is not None else None
+                fgdr_outputs = self.fgdr_modules[stage_idx](
+                    features_stage[0],
+                    outputs_stage['depth'],
+                    depth_values=F.interpolate(
+                        depth_range_samples.unsqueeze(1),
+                        [self.ndepths[stage_idx], img.shape[2] // int(stage_scale), img.shape[3] // int(stage_scale)],
+                        mode='trilinear',
+                        align_corners=Align_Corners_Range,
+                    ).squeeze(1),
+                    confidence=outputs_stage['photometric_confidence'],
+                    ref_reliability=ref_reliability,
+                    view_weights=outputs_stage.get('view_weights'),
+                )
+                if self.fgdr_anchor_base:
+                    fgdr_outputs["depth"] = base_depth
+                outputs_stage.update(fgdr_outputs)
 
             depth = outputs_stage['depth']
             if outputs_stage.get('view_weights') is not None:
