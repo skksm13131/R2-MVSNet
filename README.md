@@ -1,12 +1,19 @@
 # R2-MVSNet
 
-本仓库基于 CasMVSNet，当前主线是研究可靠性引导的多视图立体匹配改进：
+本仓库基于 CasMVSNet，当前只保留三项经过官方评估验证的改进：
 
 ```text
-Plain CasMVSNet -> SP-RWCV -> RAFE + SP-RWCV -> Adaptive R2
+Plain CasMVSNet -> SP-RWCV -> RAFE + SP-RWCV -> R2-MVSNet Full
 ```
 
 默认无增强路径必须始终保持可运行，用来作为所有实验的 baseline。
+Adaptive R2、Edge-View 和未接线实验入口已从运行代码中移除；文档中的相关内容仅作为历史负实验记录。
+
+`R2-MVSNet Full` 表示：
+
+```text
+RAFE + SP-RWCV + Anchor-FGDR candidate fusion
+```
 
 ## 文档阅读顺序
 
@@ -15,14 +22,14 @@ Plain CasMVSNet -> SP-RWCV -> RAFE + SP-RWCV -> Adaptive R2
 1. [项目交接](docs/00_project_handoff.md)：当前状态、服务器目录、常用命令、下一步。
 2. [工作习惯](docs/01_working_rules.md)：协作方式、实验记录规则、模型改动边界。
 3. [实验结果](docs/02_experiment_results.md)：官方/本地 DTU 指标、关键结论、原始 CSV。
-4. [改进日志](docs/03_improvement_log.md)：模型从 baseline 到 Adaptive R2 的演进原因。
+4. [改进日志](docs/03_improvement_log.md)：模型从 baseline 到当前主线的演进与负实验记录。
 5. [第三创新点设计](docs/04_third_innovation_fgdr.md)：FGDR 深度几何重构与点云融合协同方案。
 
 原始实验 CSV 放在 [docs/data](docs/data)。
 
 ## 常用入口
 
-训练 R2-MVSNet：
+训练完整模型：
 
 ```bash
 python train.py \
@@ -31,10 +38,12 @@ python train.py \
   --pin_m \
   --use_rafe \
   --use_view_attention \
-  --view_attention_mode single_pass_reliability_weighted
+  --view_attention_mode single_pass_reliability_weighted \
+  --use_fgdr \
+  --fgdr_anchor_base
 ```
 
-测试 R2-MVSNet：
+测试完整模型：
 
 ```bash
 python test.py \
@@ -42,13 +51,15 @@ python test.py \
   --outdir outputs_retest/<tag> \
   --use_rafe \
   --use_view_attention \
-  --view_attention_mode single_pass_reliability_weighted
+  --view_attention_mode single_pass_reliability_weighted \
+  --use_fgdr \
+  --fgdr_anchor_base
 ```
 
 融合与评估：
 
 ```bash
-python fusion-normal.py --outdir outputs_retest/<tag>
+python fusion-normal.py --outdir outputs_retest/<tag> --use_fgdr_candidates
 python matlab.py --plyPath outputs_retest/<tag> --resultPath results_m/retest_<tag>
 ```
 

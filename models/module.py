@@ -687,10 +687,9 @@ class DeConv2dFuse(nn.Module):
 class ReliabilityAwareFeatureAdapter(nn.Module):
     """Feature-side reliability estimator with residual structure-aware enhancement."""
 
-    def __init__(self, channels, prior_channels=7, min_hidden_channels=8, adaptive_difficulty=False):
+    def __init__(self, channels, prior_channels=7, min_hidden_channels=8):
         super(ReliabilityAwareFeatureAdapter, self).__init__()
         hidden_channels = max(min_hidden_channels, channels // 2)
-        self.adaptive_difficulty = adaptive_difficulty
         self.prior_proj = nn.Sequential(
             Conv2d(prior_channels, hidden_channels, 3, 1, padding=1),
             nn.Conv2d(hidden_channels, channels, 1, bias=False),
@@ -703,16 +702,9 @@ class ReliabilityAwareFeatureAdapter(nn.Module):
             Conv2d(channels * 2, hidden_channels, 3, 1, padding=1),
             nn.Conv2d(hidden_channels, 1, 1, bias=True),
         )
-        if self.adaptive_difficulty:
-            self.difficulty_head = nn.Sequential(
-                Conv2d(channels * 2 + 1, hidden_channels, 3, 1, padding=1),
-                nn.Conv2d(hidden_channels, 1, 1, bias=True),
-            )
         self.residual_scale_logit = nn.Parameter(torch.tensor(-2.2))
         nn.init.constant_(self.gate[-1].bias, -2.0)
         nn.init.constant_(self.reliability_head[-1].bias, 0.0)
-        if self.adaptive_difficulty:
-            nn.init.constant_(self.difficulty_head[-1].bias, -1.0)
 
     def forward(self, feature, structure_prior, parent_reliability=None):
         structure_prior = F.interpolate(
@@ -736,85 +728,12 @@ class ReliabilityAwareFeatureAdapter(nn.Module):
         gate = torch.sigmoid(self.gate(reliability_input))
         residual_scale = torch.sigmoid(self.residual_scale_logit)
         reliability_gate = (0.5 + reliability).clamp(min=0.5, max=1.5)
-        if self.adaptive_difficulty:
-            prior_energy = prior_feature.abs().mean(dim=1, keepdim=True)
-            prior_energy = prior_energy / (prior_energy.mean(dim=[2, 3], keepdim=True) + 1e-6)
-            difficulty_input = torch.cat([reliability_input, prior_energy], dim=1)
-            learned_difficulty = torch.sigmoid(self.difficulty_head(difficulty_input))
-            reliability_uncertainty = (1.0 - reliability).clamp(min=0.0, max=1.0)
-            difficulty_gate = (0.6 * learned_difficulty + 0.4 * reliability_uncertainty).clamp(min=0.0, max=1.0)
-        else:
-            difficulty_gate = 1.0
-        enhanced_feature = feature + residual_scale * gate * reliability_gate * difficulty_gate * prior_feature
+        enhanced_feature = feature + residual_scale * gate * reliability_gate * prior_feature
         return enhanced_feature, reliability
 
 
-class EdgeAwareFeatureBlock(nn.Module):
-    """Extract compact edge geometry and optionally refine pyramid features."""
-
-    def __init__(self, channels, prior_channels=3, min_hidden_channels=4):
-        super(EdgeAwareFeatureBlock, self).__init__()
-        hidden_channels = max(min_hidden_channels, channels // 4)
-        input_channels = channels + prior_channels
-        self.local_branch = nn.Sequential(
-            nn.Conv2d(input_channels, hidden_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True),
-        )
-        self.context_branch = nn.Sequential(
-            nn.Conv2d(input_channels, hidden_channels, 3, padding=2, dilation=2, bias=False),
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True),
-        )
-        self.fusion = nn.Sequential(
-            nn.Conv2d(hidden_channels * 2, hidden_channels, 1, bias=False),
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True),
-        )
-        # strength, direction residual (x/y), confidence
-        self.edge_head = nn.Conv2d(hidden_channels, 4, 1, bias=True)
-        self.residual_proj = nn.Conv2d(hidden_channels, channels, 1, bias=False)
-        self.residual_scale_logit = nn.Parameter(torch.tensor(-2.2))
-
-        nn.init.constant_(self.edge_head.bias, 0.0)
-        # Start exactly from the original FeatureNet path.
-        nn.init.constant_(self.residual_proj.weight, 0.0)
-
-    def forward(self, feature, edge_prior, enhance=True):
-        edge_prior = F.interpolate(
-            edge_prior,
-            size=feature.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        )
-        block_input = torch.cat([feature, edge_prior], dim=1)
-        fused = self.fusion(torch.cat([
-            self.local_branch(block_input),
-            self.context_branch(block_input),
-        ], dim=1))
-
-        raw_edge = self.edge_head(fused)
-        strength = torch.sigmoid(raw_edge[:, 0:1] + edge_prior[:, 2:3])
-        prior_direction = edge_prior[:, 0:2]
-        prior_direction = F.normalize(prior_direction, dim=1, eps=1e-6)
-        direction = F.normalize(
-            torch.tanh(raw_edge[:, 1:3]) + prior_direction,
-            dim=1,
-            eps=1e-6,
-        )
-        confidence = torch.sigmoid(raw_edge[:, 3:4])
-        edge_geometry = torch.cat([strength, direction, confidence], dim=1)
-
-        if enhance:
-            residual_scale = torch.sigmoid(self.residual_scale_logit)
-            edge_gate = strength * confidence
-            feature = feature + residual_scale * edge_gate * self.residual_proj(fused)
-        return feature, edge_geometry
-
-
 class FeatureNet(nn.Module):
-    def __init__(self, base_channels, num_stage=3, stride=4, arch_mode="unet", use_rafe=False,
-                 use_adaptive_r2=False, use_edge_feature=False, use_edge_view_weight=False):
+    def __init__(self, base_channels, num_stage=3, stride=4, arch_mode="unet", use_rafe=False):
         super(FeatureNet, self).__init__()
         assert arch_mode in ["unet", "fpn"], print("mode must be in 'unet' or 'fpn', but get:{}".format(arch_mode))
         print("*************feature extraction arch mode:{}****************".format(arch_mode))
@@ -823,16 +742,8 @@ class FeatureNet(nn.Module):
         self.base_channels = base_channels
         self.num_stage = num_stage
         self.use_rafe = use_rafe
-        self.use_adaptive_r2 = use_adaptive_r2
-        self.use_edge_feature = use_edge_feature
-        self.use_edge_view_weight = use_edge_view_weight
-        self.use_edge_branch = self.use_edge_feature or self.use_edge_view_weight
         if self.use_rafe:
             print("*************RAFE reliability-aware feature extraction enabled****************")
-            if self.use_adaptive_r2:
-                print("*************Adaptive R2 difficulty gating enabled in RAFE****************")
-        if self.use_edge_branch:
-            print("*************Edge-aware feature extraction enabled at stage1/2/3****************")
 
         self.conv0 = nn.Sequential(
             Conv2d(3, base_channels, 3, 1, padding=1),
@@ -867,15 +778,9 @@ class FeatureNet(nn.Module):
 
         if self.use_rafe:
             self.rafe_adapters = nn.ModuleDict({
-                "stage1": ReliabilityAwareFeatureAdapter(base_channels * 4, adaptive_difficulty=self.use_adaptive_r2),
-                "stage2": ReliabilityAwareFeatureAdapter(base_channels * 2, adaptive_difficulty=self.use_adaptive_r2),
-                "stage3": ReliabilityAwareFeatureAdapter(base_channels, adaptive_difficulty=self.use_adaptive_r2),
-            })
-        if self.use_edge_branch:
-            self.edge_blocks = nn.ModuleDict({
-                "stage1": EdgeAwareFeatureBlock(base_channels * 4),
-                "stage2": EdgeAwareFeatureBlock(base_channels * 2),
-                "stage3": EdgeAwareFeatureBlock(base_channels),
+                "stage1": ReliabilityAwareFeatureAdapter(base_channels * 4),
+                "stage2": ReliabilityAwareFeatureAdapter(base_channels * 2),
+                "stage3": ReliabilityAwareFeatureAdapter(base_channels),
             })
 
     def _normalize_prior_channel(self, x):
@@ -907,17 +812,6 @@ class FeatureNet(nn.Module):
             y_coord,
         ], dim=1)
 
-    def build_edge_prior(self, x):
-        gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
-        grad_x = F.pad(gray[:, :, :, 1:] - gray[:, :, :, :-1], (0, 1, 0, 0))
-        grad_y = F.pad(gray[:, :, 1:, :] - gray[:, :, :-1, :], (0, 0, 0, 1))
-        grad_mag = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-6)
-        grad_scale = grad_mag.mean(dim=[2, 3], keepdim=True).clamp(min=1e-4)
-        grad_x = torch.tanh(grad_x / grad_scale)
-        grad_y = torch.tanh(grad_y / grad_scale)
-        grad_mag = torch.tanh(grad_mag / grad_scale)
-        return torch.cat([grad_x, grad_y, grad_mag], dim=1)
-
     def inject_reliability_feature(self, stage_name, feature, structure_prior, parent_reliability=None):
         if not self.use_rafe:
             return feature, None
@@ -925,7 +819,6 @@ class FeatureNet(nn.Module):
 
     def forward(self, x):
         structure_prior = self.build_structure_prior(x) if self.use_rafe else None
-        edge_prior = self.build_edge_prior(x) if self.use_edge_branch else None
         conv0 = self.conv0(x)
         conv1 = self.conv1(conv0)
         conv2 = self.conv2(conv1)
@@ -934,49 +827,25 @@ class FeatureNet(nn.Module):
         outputs = {}
         out = self.out1(intra_feat)
         out, reliability = self.inject_reliability_feature("stage1", out, structure_prior)
-        if self.use_edge_branch:
-            out, edge_geometry = self.edge_blocks["stage1"](
-                out,
-                edge_prior,
-                enhance=self.use_edge_feature,
-            )
         outputs["stage1"] = out
         if reliability is not None:
             outputs["stage1_reliability"] = reliability
-        if self.use_edge_branch:
-            outputs["stage1_edge"] = edge_geometry
        
         if self.arch_mode == "fpn":
             if self.num_stage == 3:
                 intra_feat = F.interpolate(intra_feat, scale_factor=2, mode="nearest") + self.inner1(conv1)
                 out = self.out2(intra_feat)
                 out, reliability = self.inject_reliability_feature("stage2", out, structure_prior, reliability)
-                if self.use_edge_branch:
-                    out, edge_geometry = self.edge_blocks["stage2"](
-                        out,
-                        edge_prior,
-                        enhance=self.use_edge_feature,
-                    )
                 outputs["stage2"] = out
                 if reliability is not None:
                     outputs["stage2_reliability"] = reliability
-                if self.use_edge_branch:
-                    outputs["stage2_edge"] = edge_geometry
 
                 intra_feat = F.interpolate(intra_feat, scale_factor=2, mode="nearest") + self.inner2(conv0)
                 out = self.out3(intra_feat)
                 out, reliability = self.inject_reliability_feature("stage3", out, structure_prior, reliability)
-                if self.use_edge_branch:
-                    out, edge_geometry = self.edge_blocks["stage3"](
-                        out,
-                        edge_prior,
-                        enhance=self.use_edge_feature,
-                    )
                 outputs["stage3"] = out
                 if reliability is not None:
                     outputs["stage3_reliability"] = reliability
-                if self.use_edge_branch:
-                    outputs["stage3_edge"] = edge_geometry
 
         return outputs
 

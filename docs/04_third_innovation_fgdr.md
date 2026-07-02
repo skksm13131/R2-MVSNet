@@ -285,66 +285,9 @@ FGDR 适合做可解释图：
 
 这些图可以支撑论文叙事：模块不是盲目扰动深度，而是在 fusion 容易出错的地方自适应重构深度几何。
 
-## 实施路线
+## 当前完整实现
 
-### 阶段一：三阶段训练内版本
-
-- 三个 stage 都接 FGDR。
-- 输出 `delta`、`G`、`D_near`、`D_far`。
-- 训练先只加 `L_main + L_cover + L_radius`。
-- 前两阶段使用 FGDR 后的主深度继续指导下一阶段采样。
-- 测试先不改 fusion，只看 depth 和 local eval 是否稳定。
-
-目标：确认三阶段深度几何重构不会破坏 baseline/R2。
-
-### 阶段二：融合联动版本
-
-- 修改 `fusion-normal.py`，接收 FGDR 输出。
-- 在困难区域启用候选深度选择。
-- 引入 reliability-weighted fusion。
-
-目标：观察 Completeness 是否提升，边界和低纹理点云是否更完整。
-
-2026-06-28 已实现阶段二的保守候选融合 v1：
-
-```text
-D_main / D_near / D_far
-        -> 分别与源图主深度做多视图一致性检查
-        -> gate 允许且候选支持数至少比主深度多 1
-        -> 选择候选，否则保持 D_main
-```
-
-该版本先只改变参考图候选，不做 near/far 的全组合匹配，以控制错误匹配和点云噪声。运行开关：
-
-```bash
---use_fgdr \
---fuse_fgdr_candidates
-```
-
-其中 `--fuse_fgdr_candidates` 由 `scripts/test_fuse_eval.sh` 转换为 fusion 侧的 `--use_fgdr_candidates`，不会传给 `test.py`。关闭该开关时，原融合结果保持不变。
-
-第一版本地结果：
-
-```text
-main-depth FGDR:      Acc=0.312170, Comp=0.262030, Overall=0.287100
-FGDR candidate fuse: Acc=0.313151, Comp=0.259876, Overall=0.286514
-```
-
-候选融合以 `0.000981` 的 Accuracy 代价换取 `0.002154` 的 Completeness 改善，最终 Overall 改善 `0.000586`。这与设计预期一致：候选深度的主要作用不是继续提高单点精度，而是恢复主深度在多视图检查中被拒绝的有效点。
-
-官方 MATLAB 结果：
-
-```text
-main-depth FGDR:      Acc=0.332150, Comp=0.280857, Overall=0.306503
-FGDR candidate fuse: Acc=0.333778, Comp=0.277980, Overall=0.305879
-original R2:          Acc=0.334543, Comp=0.277197, Overall=0.305870
-```
-
-候选融合在官方评估中将 main-depth FGDR 的 Overall 改善 `0.000624`，几乎完全追回 Completeness 损失；最终与原 R2 仅差 `0.000009`。第一版已证明“候选参与 fusion”有效，但尚未形成显著超过 R2 的主指标提升。
-
-### 阶段二点五：Anchor-FGDR
-
-第一版的问题是 FGDR refined main 先替换了原 R2 深度，导致 fusion 之前已经产生 Completeness 回退。Anchor-FGDR 改为：
+FGDR 采用 Anchor 结构：
 
 ```text
 R2 base depth -> 保持为主深度和级联采样中心
@@ -368,7 +311,27 @@ L = L_R2_depth + lambda_fgdr * (
 --fgdr_center_weight 0.25
 ```
 
-### 阶段三：完整论文版本
+测试阶段保存 `base / refined / near / far`，融合阶段分别计算多视图支持。只有候选通过 geometry gate、几何检查并比 base 至少多获得 1 个一致源图支持时，才允许局部替换 base。
+
+完整模型定义：
+
+```text
+R2-MVSNet Full
+= RAFE
++ SP-RWCV
++ Anchor-FGDR candidate fusion
+```
+
+最终评估：
+
+```text
+local:    Acc=0.312612, Comp=0.249581, Overall=0.281097
+official: Acc=0.333268, Comp=0.267471, Overall=0.300370
+```
+
+相对 RAFE + SP-RWCV，官方 Overall 改善 `0.005500`，其中 Completeness 改善 `0.009726`。
+
+## 后续论文实验
 
 - 加入多视角重投影一致性损失。
 - 做完整 ablation。
