@@ -19,7 +19,7 @@ DTU_TEST_ROOT = os.environ.get(
 )
 
 parser = argparse.ArgumentParser(
-    description='Filter depth maps and fuse point cloud with NORMAL method, independently.')
+    description='DTU depth filtering and candidate-aware point cloud fusion.')
 parser.add_argument('--conf', type=float, default=0.8, help='Photometric confidence threshold.')
 parser.add_argument('--conf_stage', type=float, default=0.99,
                     help='High confidence threshold to keep original depth without averaging.')
@@ -44,7 +44,7 @@ parser.add_argument('--testpath_single_scene', help='testing data path for singl
 parser.add_argument('--testlist', default='lists/dtu/test.txt', help='List of scans to process.')
 parser.add_argument('--num_worker', type=int, default=4,
                     help='Number of workers for scenes multiprocessing (Watch out for CUDA OOM!).')
-parser.add_argument('--ndepths', type=str, default="32,16,8,8", help='ndepths')
+parser.add_argument('--ndepths', type=str, default="48,32,8", help='ndepths')
 parser.add_argument('--filter_method', type=str, default='normal', choices=["gipuma", "normal"], help="filter method")
 parser.add_argument('--display', action='store_true', help='display depth images and masks')
 
@@ -161,7 +161,8 @@ def batch_reproject_gpu(depth_ref, intrinsics_ref, extrinsics_ref, depths_src, i
 def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t,
                                  args, device):
     num_sources, height, width = src_depths_t.shape
-    effective_s_view = min(args.s_view, max(0, num_sources - 1))
+    effective_s_view = max(1, min(args.s_view, num_sources))
+    effective_e_view = max(effective_s_view + 1, num_sources)
 
     depth_reproj, x2d, y2d = batch_reproject_gpu(
         depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t, device)
@@ -179,7 +180,7 @@ def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths
         depth_candidate.unsqueeze(0).abs() + 1e-6)
 
     geo_mask_sums = []
-    for consistent_views in range(effective_s_view, num_sources):
+    for consistent_views in range(effective_s_view, effective_e_view):
         depth_threshold = math.log(max(consistent_views, 1.05), 10) * args.diff_base
         consistency = (
             (dist < consistent_views * args.dist_base) &
@@ -189,10 +190,10 @@ def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths
 
     geo_mask = geo_mask_sums[-1] >= num_sources
     for support_sum, consistent_views in zip(
-            geo_mask_sums, range(effective_s_view, num_sources)):
+            geo_mask_sums, range(effective_s_view, effective_e_view)):
         geo_mask = geo_mask | (support_sum >= consistent_views)
 
-    broad_level = num_sources - 1
+    broad_level = max(1, num_sources - 1)
     broad_mask = (
         (dist < broad_level * args.dist_base) &
         (depth_diff < math.log(max(broad_level, 1.05), 10) * args.diff_base)

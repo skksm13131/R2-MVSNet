@@ -250,6 +250,90 @@ official: Acc=0.333268, Comp=0.267471, Overall=0.300370
 - 本地与官方评估方向一致，该配置正式定义为 `R2-MVSNet Full`。
 - 官方结果：`docs/data/official_r2_anchor_fgdr_candidate_fusion_m015.csv`。
 
+2026-07-05 RAFE-only 消融：
+
+```text
+train tag: 20260630_rafe_only_bs3_e16_val
+test/fusion tag: 20260705_rafe_only_bs3_m015_001
+flags: --use_rafe
+local: Acc=0.311429, Comp=0.261232, Overall=0.286330
+```
+
+- 使用独立训练的 RAFE-only checkpoint，不是从组合模型临时关闭 SP-RWCV。
+- 测试时 `view_attention=False, rafe=True, fgdr=False`，使用普通点云融合。
+- 相对 plain baseline，本地 Overall 改善 `0.004613`，17/22 个场景改善。
+- 相对 RAFE + SP-RWCV，本地 Overall 改善 `0.000622`，12/22 个场景改善。
+- 官方结果：`Acc=0.331468, Comp=0.279875, Overall=0.305671`。
+
+2026-07-05 RAFE + SP-RWCV epoch 14 复测：
+
+```text
+train tag: 20260616_r2_rafe_sprwcv_bs4_e16
+checkpoint: model_000014.ckpt
+test/fusion tag: 20260705_r2_rafe_sprwcv_ckpt14_m015_001
+local: Acc=0.316204, Comp=0.257473, Overall=0.286838
+```
+
+- 相对 epoch 15，Completeness 改善 `0.001805`，Accuracy 回退 `0.001579`，Overall 改善 `0.000114`。
+- 相对 RAFE-only，本地 Overall 回退 `0.000508`。
+- 官方评估机仍无法连接，官方 MATLAB 结果待补。
+
+2026-07-06 RAFE + Anchor-FGDR candidate fusion 消融：
+
+```text
+train tag: 20260705_rafe_anchor_fgdr_bs5_e16
+checkpoint: model_000015.ckpt
+test/fusion tag: 20260706_rafe_anchor_fgdr_candidate_fusion_m015_001
+flags: --use_rafe --use_fgdr --fgdr_anchor_base --fuse_fgdr_candidates
+disabled: SP-RWCV
+local: Acc=0.313301, Comp=0.256046, Overall=0.284673
+```
+
+- 完成 22 个 scan 测试、FGDR 候选融合和本地评估。
+- 相对 RAFE-only，Accuracy 回退 `0.001872`，Completeness 改善 `0.005186`，Overall 改善 `0.001657`。
+- 相对 RAFE + SP-RWCV，Overall 改善 `0.002279`。
+- 相对 R2-MVSNet Full，Overall 仍回退 `0.003576`，主要差距来自 Completeness。
+- 候选融合确实发生，单视图日志中的 FGDR switch ratio 通常处于低百分比区间，符合保守候选替换设计。
+- 原始结果：`docs/data/internal_rafe_anchor_fgdr_candidate_fusion_m015.csv`。
+
+## Decoupled SP-RWCV
+
+2026-07-06 针对 RAFE 与 SP-RWCV 组合略弱于 RAFE-only 的现象，增加可靠性解耦模式：
+
+```text
+--use_rafe
+--use_view_attention
+--view_attention_mode decoupled_reliability_weighted
+```
+
+原 SP-RWCV 在启用 RAFE 时，源图可靠性既作为 `ScoreNet` 输入，又在
+`score_to_weight` 中乘到权重残差上。后一次乘法会压缩低可靠源图的权重调整幅度，
+使本应明显下调的源图更接近等权聚合。
+
+新模式只解除输出端的重复门控：
+
+- 参考图和源图可靠性仍进入 `ScoreNet`，继续参与可靠性判断。
+- 上一阶段光度置信度门控保持不变，用于抑制不稳定的跨阶段调整。
+- 权重范围、残差初始化和加权方差公式保持不变。
+- 原 `single_pass_reliability_weighted` 行为完全保留，便于严格消融与回滚。
+
+该模式不新增可训练参数，checkpoint 结构保持兼容，但应独立训练后再比较，不能只在
+旧 checkpoint 测试时切换模式。
+
+2026-07-06 修改后完整模型训练：
+
+```text
+train tag: 20260706_r2_decoupled_sprwcv_anchor_fgdr_bs4_e16
+flags: --use_rafe --use_view_attention --view_attention_mode decoupled_reliability_weighted --use_fgdr --fgdr_anchor_base
+batch_size: 4
+epochs: 16
+status: running
+```
+
+- 训练机部署前已备份 `models/cas_mvsnet.py`、`models/modules/view_attention.py`、`train.py` 和 `test.py`。
+- 新旧模式的 `state_dict` 参数键完全一致，旧 checkpoint 可 `strict=True` 加载。
+- 训练启动后模型配置打印正确，GPU 利用率正常，未出现 OOM。
+
 ## 暂缓或废弃想法
 
 旧实验中出现过 Direct-SCRF v2、RMFE、UGDR、CADR、RAHS、normal guidance、geometry guidance 等想法。

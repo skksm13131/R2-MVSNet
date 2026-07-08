@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import math
 import os
 import sys
@@ -13,14 +13,14 @@ from datasets.data_io import read_pfm, save_pfm
 import signal
 
 SHARED_ROOT = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
-DTU_TEST_ROOT = os.environ.get(
-    "R2MVSNET_DTU_TEST_PATH",
-    os.path.join(SHARED_ROOT, "datasets", "dtu_testing"),
+TNT_TEST_ROOT = os.environ.get(
+    "R2MVSNET_TNT_TEST_PATH",
+    os.path.join(SHARED_ROOT, "datasets", "TankandTemples"),
 )
 
 parser = argparse.ArgumentParser(
-    description='Filter depth maps and fuse point cloud with NORMAL method, independently.')
-parser.add_argument('--conf', type=float, default=0.8, help='Photometric confidence threshold.')
+    description='TNT/TAT depth filtering and candidate-aware point cloud fusion.')
+parser.add_argument('--conf', type=float, default=0.8, help='Fallback photometric confidence threshold.')
 parser.add_argument('--conf_stage', type=float, default=0.99,
                     help='High confidence threshold to keep original depth without averaging.')
 parser.add_argument('--s_view', type=int, default=3, help='Start of consistent view count for dynamic check.')
@@ -36,15 +36,15 @@ parser.add_argument('--fgdr_candidate_gate_threshold', type=float, default=0.5,
 parser.add_argument('--fgdr_candidate_min_support_gain', type=int, default=1,
                     help='minimum additional consistent source views required to replace main depth')
 
-parser.add_argument('--outdir', default='./outputs',
+parser.add_argument('--outdir', default='./outputs_tnt',
                     help='Directory where scan folders with depth/confidence are located.')
-parser.add_argument('--testpath', default=DTU_TEST_ROOT,
+parser.add_argument('--testpath', default=TNT_TEST_ROOT,
                     help='Original testing data dir (for camera and pair files).')
 parser.add_argument('--testpath_single_scene', help='testing data path for single scene')
-parser.add_argument('--testlist', default='lists/dtu/test.txt', help='List of scans to process.')
-parser.add_argument('--num_worker', type=int, default=4,
+parser.add_argument('--testlist', default='lists/tnt/all.txt', help='List of scans to process.')
+parser.add_argument('--num_worker', type=int, default=1,
                     help='Number of workers for scenes multiprocessing (Watch out for CUDA OOM!).')
-parser.add_argument('--ndepths', type=str, default="32,16,8,8", help='ndepths')
+parser.add_argument('--ndepths', type=str, default="48,32,8", help='ndepths')
 parser.add_argument('--filter_method', type=str, default='normal', choices=["gipuma", "normal"], help="filter method")
 parser.add_argument('--display', action='store_true', help='display depth images and masks')
 
@@ -52,6 +52,37 @@ args = parser.parse_args()
 if args.testpath_single_scene:
     args.testpath = os.path.dirname(args.testpath_single_scene)
 num_stage = len([int(nd) for nd in args.ndepths.split(",") if nd])
+
+INTERMEDIATE_SCENES = [
+    "Family", "Francis", "Horse", "Lighthouse",
+    "M60", "Panther", "Playground", "Train",
+]
+ADVANCED_SCENES = [
+    "Auditorium", "Ballroom", "Courtroom", "Museum", "Palace", "Temple",
+]
+
+TNT_CONFIGS = {
+    "intermediate": {
+        "conf": 0.80,
+        "s_view": 5,
+        "e_view": 11,
+        "dist_base": 0.20,
+        "diff_base": 1 / 1500,
+    },
+    "advanced": {
+        "conf": 0.50,
+        "s_view": 2,
+        "e_view": 11,
+        "dist_base": 0.25,
+        "diff_base": 1 / 1300,
+    },
+}
+
+
+def get_scene_config(scene_name):
+    if scene_name in ADVANCED_SCENES:
+        return "advanced", TNT_CONFIGS["advanced"]
+    return "intermediate", TNT_CONFIGS["intermediate"]
 
 
 def save_mask(filename, mask):
@@ -87,11 +118,11 @@ def read_pair_file(filename):
     return data
 
 
-# 【终极优化：原生极速二进制 PLY 保存器】
+# 銆愮粓鏋佷紭鍖栵細鍘熺敓鏋侀€熶簩杩涘埗 PLY 淇濆瓨鍣ㄣ€?
 def save_ply_fast(filename, vertexs, colors):
     if len(vertexs) == 0:
         return
-    # 构建适合 PLY 二进制规范的结构化 NumPy 数组
+    # 鏋勫缓閫傚悎 PLY 浜岃繘鍒惰鑼冪殑缁撴瀯鍖?NumPy 鏁扮粍
     vertex_all = np.empty(len(vertexs), dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
                                                ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
     vertex_all['x'] = vertexs[:, 0]
@@ -101,19 +132,19 @@ def save_ply_fast(filename, vertexs, colors):
     vertex_all['green'] = colors[:, 1]
     vertex_all['blue'] = colors[:, 2]
 
-    # 按照标准生成文本 Header
+    # 鎸夌収鏍囧噯鐢熸垚鏂囨湰 Header
     header = f"ply\nformat binary_little_endian 1.0\nelement vertex {len(vertex_all)}\n"
     header += "property float x\nproperty float y\nproperty float z\n"
     header += "property uchar red\nproperty uchar green\nproperty uchar blue\n"
     header += "end_header\n"
 
-    # 以二进制模式一次性将 Header 和内存数据冲刷到硬盘，速度极快
+    # 浠ヤ簩杩涘埗妯″紡涓€娆℃€у皢 Header 鍜屽唴瀛樻暟鎹啿鍒峰埌纭洏锛岄€熷害鏋佸揩
     with open(filename, 'wb') as f:
         f.write(header.encode('ascii'))
         f.write(vertex_all.tobytes())
 
 
-# 【核心引擎】构建完全基于张量广播的极速 GPU 并行重投影引擎
+# 銆愭牳蹇冨紩鎿庛€戞瀯寤哄畬鍏ㄥ熀浜庡紶閲忓箍鎾殑鏋侀€?GPU 骞惰閲嶆姇褰卞紩鎿?
 def batch_reproject_gpu(depth_ref, intrinsics_ref, extrinsics_ref, depths_src, intrinsics_src, extrinsics_src, device):
     N, H, W = depths_src.shape
 
@@ -135,7 +166,7 @@ def batch_reproject_gpu(depth_ref, intrinsics_ref, extrinsics_ref, depths_src, i
     K_xyz_src = torch.bmm(intrinsics_src, xyz_src)
     xy_src = K_xyz_src[:, :2, :] / (K_xyz_src[:, 2:3, :] + 1e-6)
 
-    # 转换为 grid_sample 接受的 [-1, 1] 区间
+    # 杞崲涓?grid_sample 鎺ュ彈鐨?[-1, 1] 鍖洪棿
     grid_x = (xy_src[:, 0, :] / (W - 1)) * 2.0 - 1.0
     grid_y = (xy_src[:, 1, :] / (H - 1)) * 2.0 - 1.0
     grid = torch.stack([grid_x, grid_y], dim=-1).view(N, H, W, 2)
@@ -161,7 +192,8 @@ def batch_reproject_gpu(depth_ref, intrinsics_ref, extrinsics_ref, depths_src, i
 def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t,
                                  args, device):
     num_sources, height, width = src_depths_t.shape
-    effective_s_view = min(args.s_view, max(0, num_sources - 1))
+    effective_s_view = max(1, min(args.s_view, num_sources))
+    effective_e_view = max(effective_s_view + 1, num_sources)
 
     depth_reproj, x2d, y2d = batch_reproject_gpu(
         depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t, device)
@@ -179,7 +211,7 @@ def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths
         depth_candidate.unsqueeze(0).abs() + 1e-6)
 
     geo_mask_sums = []
-    for consistent_views in range(effective_s_view, num_sources):
+    for consistent_views in range(effective_s_view, effective_e_view):
         depth_threshold = math.log(max(consistent_views, 1.05), 10) * args.diff_base
         consistency = (
             (dist < consistent_views * args.dist_base) &
@@ -189,10 +221,10 @@ def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths
 
     geo_mask = geo_mask_sums[-1] >= num_sources
     for support_sum, consistent_views in zip(
-            geo_mask_sums, range(effective_s_view, num_sources)):
+            geo_mask_sums, range(effective_s_view, effective_e_view)):
         geo_mask = geo_mask | (support_sum >= consistent_views)
 
-    broad_level = num_sources - 1
+    broad_level = max(1, num_sources - 1)
     broad_mask = (
         (dist < broad_level * args.dist_base) &
         (depth_diff < math.log(max(broad_level, 1.05), 10) * args.diff_base)
@@ -280,11 +312,11 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         src_views = src_views[:dy_range]
         if len(src_views) == 0: continue
 
-        # 加载主视图并送入 GPU
+        # 鍔犺浇涓昏鍥惧苟閫佸叆 GPU
         ref_in_np, ref_ex_np = read_camera_parameters(os.path.join(scan_folder, 'cams/{:0>8}_cam.txt'.format(ref_view)))
         ref_img = read_img(os.path.join(scan_folder, 'images/{:0>8}.jpg'.format(ref_view)))
 
-        # 强制 NumPy 分配连续正向内存，解决 negative stride 问题
+        # 寮哄埗 NumPy 鍒嗛厤杩炵画姝ｅ悜鍐呭瓨锛岃В鍐?negative stride 闂
         ref_depth_est = torch.from_numpy(
             read_pfm(os.path.join(out_folder, 'depth_est/{:0>8}.pfm'.format(ref_view)))[0].copy()).to(device)
         confidence = torch.from_numpy(
@@ -295,7 +327,7 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         ref_ex_t = torch.from_numpy(ref_ex_np.copy()).to(device)
         H, W = ref_depth_est.shape
 
-        # 将该视角下的所有源视图数据堆叠（Stack），打包送进显存
+        # 灏嗚瑙嗚涓嬬殑鎵€鏈夋簮瑙嗗浘鏁版嵁鍫嗗彔锛圫tack锛夛紝鎵撳寘閫佽繘鏄惧瓨
         src_depths, src_ins, src_exs = [], [], []
         for src_view in src_views:
             i_np, e_np = read_camera_parameters(os.path.join(scan_folder, 'cams/{:0>8}_cam.txt'.format(src_view)))
@@ -380,10 +412,10 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         final_mask = photo_mask & geo_mask
 
         # -----------------------------------------------------------
-        # 【全量 GPU 矩阵运算：点云 3D 投影】
+        # 銆愬叏閲?GPU 鐭╅樀杩愮畻锛氱偣浜?3D 鎶曞奖銆?
         # -----------------------------------------------------------
 
-        # 1. 在 GPU 上直接提取合法点
+        # 1. 鍦?GPU 涓婄洿鎺ユ彁鍙栧悎娉曠偣
         x_val = x_ref[final_mask].float()
         y_val = y_ref[final_mask].float()
         depth_val = depth_est_averaged[final_mask]
@@ -391,7 +423,7 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         if x_val.numel() == 0:
             continue
 
-        # 2. 在 GPU 上构建齐次坐标并反投影为世界坐标 [X, Y, Z]
+        # 2. 鍦?GPU 涓婃瀯寤洪綈娆″潗鏍囧苟鍙嶆姇褰变负涓栫晫鍧愭爣 [X, Y, Z]
         ones_val = torch.ones_like(x_val)
         xy1_val = torch.stack([x_val, y_val, ones_val], dim=0)  # [3, N_points]
 
@@ -402,7 +434,7 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         xyz_ref_val_4 = torch.cat([xyz_ref_val, ones_val.unsqueeze(0)], dim=0)
         xyz_world = torch.matmul(inv_ex_t, xyz_ref_val_4)[:3, :]  # [3, N_points]
 
-        # 3. 颜色提取
+        # 3. 棰滆壊鎻愬彇
         color_img = ref_img
         if color_img.shape[0] != H or color_img.shape[1] != W:
             color_img = cv2.resize(color_img, (W, H), interpolation=cv2.INTER_LINEAR)
@@ -410,13 +442,13 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
         color_img_t = torch.from_numpy(color_img).to(device)
         color_val = color_img_t[final_mask]  # [N_points, 3]
 
-        # 4. 将该视角的合法点集存入列表 (暂时停留在显存中)
-        vertexs.append(xyz_world.t())  # 转置为 [N_points, 3]
+        # 4. 灏嗚瑙嗚鐨勫悎娉曠偣闆嗗瓨鍏ュ垪琛?(鏆傛椂鍋滅暀鍦ㄦ樉瀛樹腑)
+        vertexs.append(xyz_world.t())  # 杞疆涓?[N_points, 3]
         vertex_colors.append(color_val)
 
         # -----------------------------------------------------------
 
-        # 依旧保存一些必要的 2D 掩码结果（可选，可注释以进一步加速）
+        # 渚濇棫淇濆瓨涓€浜涘繀瑕佺殑 2D 鎺╃爜缁撴灉锛堝彲閫夛紝鍙敞閲婁互杩涗竴姝ュ姞閫燂級
         final_mask_np = final_mask.cpu().numpy()
         os.makedirs(os.path.join(out_folder, "mask"), exist_ok=True)
         save_mask(os.path.join(out_folder, "mask/{:0>8}_photo.png".format(ref_view)), photo_mask.cpu().numpy())
@@ -454,22 +486,22 @@ def filter_depth_gpu(pair_folder, scan_folder, out_folder, plyfilename, args, de
                     f"(near={near_ratio:.4f}, far={far_ratio:.4f})"
                 )
 
-        print("processing {}, ref-view{:0>2}, Final Mask Ratio: {:.4f}{} [⚡ 3D GPU]".format(
+        print("processing {}, ref-view{:0>2}, Final Mask Ratio: {:.4f}{} [鈿?3D GPU]".format(
             scan_folder, ref_view, final_mask_np.mean(), candidate_message))
 
-    # 循环遍历所有视角结束，将显存里所有的点一次性打包给 CPU 硬盘
+    # 寰幆閬嶅巻鎵€鏈夎瑙掔粨鏉燂紝灏嗘樉瀛橀噷鎵€鏈夌殑鐐逛竴娆℃€ф墦鍖呯粰 CPU 纭洏
     if len(vertexs) > 0:
         all_vertexs = torch.cat(vertexs, dim=0).cpu().numpy()
         all_colors = torch.cat(vertex_colors, dim=0).cpu().numpy()
         all_colors = (all_colors * 255).clip(0, 255).astype(np.uint8)
 
-        # 调用极速保存器
+        # 璋冪敤鏋侀€熶繚瀛樺櫒
         save_ply_fast(plyfilename, all_vertexs, all_colors)
-        print(f"\n✅ 成功极速保存了 {len(all_vertexs)} 个点云，文件路径: {plyfilename}")
+        print(f"\n鉁?鎴愬姛鏋侀€熶繚瀛樹簡 {len(all_vertexs)} 涓偣浜戯紝鏂囦欢璺緞: {plyfilename}")
     else:
-        print(f"\n⚠️ 警告: 该场景未能生成任何有效点云！")
+        print(f"\n鈿狅笍 璀﹀憡: 璇ュ満鏅湭鑳界敓鎴愪换浣曟湁鏁堢偣浜戯紒")
 
-    torch.cuda.empty_cache()  # 释放显存
+    torch.cuda.empty_cache()  # 閲婃斁鏄惧瓨
 
 
 def init_worker():
@@ -477,8 +509,11 @@ def init_worker():
 
 
 def pcd_filter_worker(scan, args):
-    # 【核心修改】为每个进程独立初始化 device，避免 CUDA Context 冲突
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    split_name, scene_config = get_scene_config(scan)
+    scene_args = argparse.Namespace(**vars(args))
+    for key, value in scene_config.items():
+        setattr(scene_args, key, value)
 
     if scan.startswith("scan") and scan[4:].isdigit():
         scan_id = int(scan[4:])
@@ -486,35 +521,61 @@ def pcd_filter_worker(scan, args):
     else:
         save_name = '{}.ply'.format(scan)
 
-    pair_folder = os.path.join(args.testpath, scan)
+    pair_folder = os.path.join(args.testpath, split_name, scan)
+    if not os.path.isdir(pair_folder):
+        pair_folder = os.path.join(args.testpath, scan)
     scan_folder = os.path.join(args.outdir, scan)
     out_folder = os.path.join(args.outdir, scan)
 
-    filter_depth_gpu(pair_folder, scan_folder, out_folder, os.path.join(args.outdir, save_name), args, device)
+    print(
+        f"--- Processing {scan} as {split_name}: "
+        f"conf={scene_args.conf}, s_view={scene_args.s_view}, "
+        f"e_view={scene_args.e_view}, dist_base={scene_args.dist_base}, "
+        f"diff_base={scene_args.diff_base} ---"
+    )
+    filter_depth_gpu(
+        pair_folder,
+        scan_folder,
+        out_folder,
+        os.path.join(args.outdir, save_name),
+        scene_args,
+        device,
+    )
 
 
 if __name__ == '__main__':
-    # 【安全多进程】PyTorch 在 CUDA 下使用 multiprocessing 必须使用 'spawn' 模式
+    # 銆愬畨鍏ㄥ杩涚▼銆慞yTorch 鍦?CUDA 涓嬩娇鐢?multiprocessing 蹇呴』浣跨敤 'spawn' 妯″紡
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
 
-    if args.testlist != "all":
+    if args.testlist != "all" and os.path.exists(args.testlist):
         with open(args.testlist) as f:
             content = f.readlines()
-            testlist = [line.rstrip() for line in content]
+            testlist = [line.rstrip() for line in content if line.strip()]
     else:
-        testlist = [e for e in os.listdir(args.testpath) if os.path.isdir(os.path.join(args.testpath, e))] \
-            if not args.testpath_single_scene else [os.path.basename(args.testpath_single_scene)]
+        if args.testpath_single_scene:
+            testlist = [os.path.basename(args.testpath_single_scene)]
+        else:
+            testlist = []
+            for split_name in ("intermediate", "advanced"):
+                split_dir = os.path.join(args.testpath, split_name)
+                if os.path.isdir(split_dir):
+                    testlist.extend(
+                        e for e in os.listdir(split_dir)
+                        if os.path.isdir(os.path.join(split_dir, e))
+                    )
+            if not testlist:
+                testlist = INTERMEDIATE_SCENES + ADVANCED_SCENES
 
-    print(f"--- Starting Point Cloud Fusion (PyTorch GPU Accelerated ⚡) ---")
+    print(f"--- Starting Point Cloud Fusion (PyTorch GPU Accelerated 鈿? ---")
 
     if args.filter_method != "gipuma":
-        # 如果设置的 worker 数量超过场景总数，限制它
+        # 濡傛灉璁剧疆鐨?worker 鏁伴噺瓒呰繃鍦烘櫙鎬绘暟锛岄檺鍒跺畠
         workers = min(args.num_worker, len(testlist))
-        print(f"🚀 Using {workers} parallel processes for {len(testlist)} scenes...")
-        print(f"⚠️ Warning: If you run into 'CUDA Out of Memory', please reduce --num_worker")
+        print(f"馃殌 Using {workers} parallel processes for {len(testlist)} scenes...")
+        print(f"鈿狅笍 Warning: If you run into 'CUDA Out of Memory', please reduce --num_worker")
 
         partial_func = partial(pcd_filter_worker, args=args)
         p = mp.Pool(workers, init_worker)

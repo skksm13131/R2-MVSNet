@@ -89,6 +89,37 @@ RAFE + SP-RWCV
 R2-MVSNet Full
 ```
 
+RAFE-only 独立消融已于 2026-07-05 完成本地评估：
+
+```text
+train tag: 20260630_rafe_only_bs3_e16_val
+eval tag: 20260705_rafe_only_bs3_m015_001
+local:    Acc=0.311429, Comp=0.261232, Overall=0.286330
+official: Acc=0.331468, Comp=0.279875, Overall=0.305671
+```
+
+RAFE + Anchor-FGDR candidate fusion 消融已于 2026-07-06 完成本地评估：
+
+```text
+train tag: 20260705_rafe_anchor_fgdr_bs5_e16
+eval tag: 20260706_rafe_anchor_fgdr_candidate_fusion_m015_001
+local: Acc=0.313301, Comp=0.256046, Overall=0.284673
+official: pending
+```
+
+修改后的完整模型已于 2026-07-06 启动从头训练：
+
+```text
+train tag: 20260706_r2_decoupled_sprwcv_anchor_fgdr_bs4_e16
+flags: --use_rafe --use_view_attention --view_attention_mode decoupled_reliability_weighted --use_fgdr --fgdr_anchor_base
+batch_size: 4
+epochs: 16
+status: running
+```
+
+该版本只解除 SP-RWCV 输出端重复的源图可靠性幅度门控；可靠性仍作为 ScoreNet 输入。
+训练机原始四个相关源码已备份到 `backups/20260706_decoupled_sp_rwcv/`。
+
 ## 常用训练命令
 
 进入服务器项目目录：

@@ -20,14 +20,20 @@ import torch.distributed as dist
 
 cudnn.benchmark = True
 
+SHARED_ROOT = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
+DTU_TRAIN_ROOT = os.environ.get(
+    "R2MVSNET_DTU_TRAIN_PATH",
+    os.path.join(SHARED_ROOT, "datasets", "dtu"),
+)
+
 parser = argparse.ArgumentParser(description='A PyTorch Implementation of Cascade Cost Volume MVSNet')
 parser.add_argument('--mode', default='train', help='train or test', choices=['train', 'test', 'profile'])
 parser.add_argument('--model', default='mvsnet', help='select model')
 parser.add_argument('--device', default='cuda', help='select model')
 
 parser.add_argument('--dataset', default='dtu_yao', help='select dataset')
-parser.add_argument('--trainpath', default='/home/u104754251515/data/mvs_training/dtu', help='train datapath')
-parser.add_argument('--testpath', default='/home/u104754251515/data/mvs_training/dtu', help='test datapath')
+parser.add_argument('--trainpath', default=DTU_TRAIN_ROOT, help='train datapath')
+parser.add_argument('--testpath', default=DTU_TRAIN_ROOT, help='validation/test datapath')
 parser.add_argument('--trainlist', default='lists/dtu/train.txt', help='train list')
 parser.add_argument('--testlist', default='lists/dtu/test.txt', help='test list')
 
@@ -62,37 +68,17 @@ parser.add_argument('--depth_inter_r', type=str, default="4,2,1", help='depth_in
 parser.add_argument('--dlossw', type=str, default="0.5,1.0,2.0", help='depth loss weight for different stage')
 parser.add_argument('--cr_base_chs', type=str, default="8,8,8", help='cost regularization base channels')
 parser.add_argument('--grad_method', type=str, default="detach", choices=["detach", "undetach"], help='grad method')
-parser.add_argument('--use_eta', action='store_true', help='enable ETA visibility weighting')
-parser.add_argument('--use_view_attention', action='store_true', help='enable warped-view reliability fusion in DepthNet')
-parser.add_argument('--view_attention_mode', type=str, default='legacy', choices=['legacy', 'residual_fusion', 'progressive_residual_fusion', 'single_pass_reliability_weighted'], help='view attention / reliability fusion mode')
-parser.add_argument('--use_reliability_guidance', action='store_true', help='enable confidence-guided stage interval/reliability propagation')
-parser.add_argument('--reliability_stage_start', type=int, default=2, help='stage to start reliability guidance')
-parser.add_argument('--reliability_interval_scale', type=float, default=0.5, help='reliability-guided interval scale')
-parser.add_argument('--reliability_confidence_mix', type=float, default=0.5, help='photometric/texture confidence mix')
-parser.add_argument('--reliability_min_interval_factor', type=float, default=0.5, help='minimum depth interval factor under reliability guidance')
-parser.add_argument('--stage_consistency_start', type=int, default=2, help='stage to start SCRF stage-consistency gating')
-parser.add_argument('--stage_consistency_weight', type=float, default=0.5, help='SCRF geometry agreement weight in stage-consistency prior')
-parser.add_argument('--stage_consistency_temperature', type=float, default=1.0, help='SCRF geometry agreement temperature')
-parser.add_argument('--use_hypothesis_sampling', action='store_true', help='enable RAHS reliability-aware hypothesis sampling')
-parser.add_argument('--hypothesis_sampling_start', type=int, default=2, help='stage to start RAHS hypothesis sampling')
-parser.add_argument('--hypothesis_sampling_strength', type=float, default=0.55, help='RAHS hypothesis redistribution strength')
-parser.add_argument('--hypothesis_sampling_shift_scale', type=float, default=0.35, help='RAHS bounded center-shift scale in depth intervals')
-parser.add_argument('--use_cadr', action='store_true', help='enable CADR confidence-aware distribution regression')
-parser.add_argument('--cadr_stage_start', type=int, default=2, help='stage to start CADR distribution regression')
-parser.add_argument('--cadr_window_radius', type=int, default=2, help='CADR local peak-window radius in hypothesis bins')
-parser.add_argument('--cadr_max_residual_ratio', type=float, default=0.45, help='CADR maximum residual as a ratio of stage interval')
-parser.add_argument('--cadr_confidence_mix', type=float, default=0.5, help='CADR blend between propagated confidence and peak confidence')
-parser.add_argument('--use_rmfe', action='store_true', help='enable RMFE learnable multi-scale feature enhancement')
+parser.add_argument('--use_view_attention', action='store_true', help='enable SP-RWCV source-view reliability weighting')
+parser.add_argument('--view_attention_mode', type=str, default='single_pass_reliability_weighted',
+                    choices=['single_pass_reliability_weighted', 'decoupled_reliability_weighted'],
+                    help='SP-RWCV weighting variant')
 parser.add_argument('--use_rafe', action='store_true', help='enable reliability-aware feature extraction')
-parser.add_argument('--use_adaptive_r2', action='store_true', help='enable difficulty-adaptive RAFE and SP-RWCV gating')
 parser.add_argument('--use_fgdr', action='store_true', help='enable progressive fusion-guided depth refinement')
 parser.add_argument('--fgdr_max_radius_factor', type=float, default=2.0, help='maximum FGDR candidate radius in local depth intervals')
 parser.add_argument('--fgdr_anchor_base', action='store_true', help='keep original R2 depth as the cascade/fusion anchor')
 parser.add_argument('--fgdr_loss_weight', type=float, default=0.05, help='FGDR cover/radius loss weight')
 parser.add_argument('--fgdr_radius_weight', type=float, default=0.1, help='FGDR high-confidence radius regularization weight')
 parser.add_argument('--fgdr_center_weight', type=float, default=0.25, help='FGDR candidate-center supervision weight')
-parser.add_argument('--use_ugdr', action='store_true', help='enable UGDR final-stage bounded depth refinement')
-parser.add_argument('--ugdr_max_residual_ratio', type=float, default=0.5, help='UGDR maximum residual as a ratio of final-stage interval')
 
 parser.add_argument('--using_apex', action='store_true', help='using apex, need to install apex')
 parser.add_argument('--sync_bn', action='store_true', help='enabling apex sync BN.')
@@ -507,7 +493,6 @@ if __name__ == '__main__':
                           use_view_attention=args.use_view_attention,
                           view_attention_mode=args.view_attention_mode,
                           use_rafe=args.use_rafe,
-                          use_adaptive_r2=args.use_adaptive_r2,
                           use_fgdr=args.use_fgdr,
                           fgdr_max_radius_factor=args.fgdr_max_radius_factor,
                           fgdr_anchor_base=args.fgdr_anchor_base)

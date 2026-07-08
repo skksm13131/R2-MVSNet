@@ -6,6 +6,64 @@ import sys
 sys.path.append("..")
 from utils import local_pcd
 
+"""
+module.py
+│
+├── 1. 基础工具函数
+│   ├── init_bn()
+│   └── init_uniform()
+│
+├── 2. 基础卷积模块
+│   ├── Conv2d
+│   ├── Deconv2d
+│   ├── Conv3d
+│   ├── Deconv3d
+│   ├── ConvBnReLU
+│   ├── ConvBn
+│   ├── ConvBnReLU3D
+│   └── ConvBn3D
+│
+├── 3. 注意力辅助模块
+│   ├── ChannelAttention
+│   ├── SpatialAttention
+│   └── AttentionGuidedCostVolumeFusion
+│
+├── 4. 跨尺度特征增强模块
+│   └── CrossScaleAttentionBlock
+│
+├── 5. 基础网络结构模块
+│   ├── BasicBlock
+│   └── Hourglass3d
+│
+├── 6. 单应性变换 / 特征投影
+│   └── homo_warping()
+│
+├── 7. 2D 上采样融合模块
+│   └── DeConv2dFuse
+│
+├── 8. RAFE 可靠性感知特征模块
+│   └── ReliabilityAwareFeatureAdapter
+│
+├── 9. 特征提取主网络
+│   └── FeatureNet
+│
+├── 10. 代价体正则化网络
+│   └── CostRegNet
+│
+├── 11. 深度图细化网络
+│   └── RefineNet
+│
+├── 12. FGDR 候选深度细化模块
+│   └── FusionGuidedDepthRefinement
+│
+└── 13. 深度采样、深度回归和损失函数
+    ├── depth_regression()
+    ├── cas_mvsnet_loss()
+    ├── get_cur_depth_range_samples()
+    └── get_depth_range_samples()
+
+"""
+
 def init_bn(module):
     if module.weight is not None:
         nn.init.ones_(module.weight)

@@ -1,0 +1,173 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="980" viewBox="0 0 1700 980">
+  <defs>
+    <style>
+      .title { font: 700 30px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; }
+      .subtitle { font: 400 16px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #5b6475; }
+      .section { font: 700 18px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #344054; }
+      .label { font: 600 17px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; }
+      .small { font: 400 14px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #475467; }
+      .formula { font: 500 17px "Cambria Math", "Times New Roman", serif; fill: #172033; }
+      .box { stroke-width: 2; rx: 14; ry: 14; }
+      .input { fill: #eaf3ff; stroke: #4d83c4; }
+      .reliability { fill: #e8f8f4; stroke: #2b9b81; }
+      .score { fill: #fff3df; stroke: #dc8b24; }
+      .aggregate { fill: #f1ecff; stroke: #7b61c9; }
+      .output { fill: #eaf7ed; stroke: #3d9b5f; }
+      .disabled { fill: #fff1f0; stroke: #d04444; stroke-dasharray: 7 5; }
+      .arrow { fill: none; stroke: #667085; stroke-width: 2.2; marker-end: url(#arrow); }
+      .rel-arrow { fill: none; stroke: #2b9b81; stroke-width: 2.2; stroke-dasharray: 7 5; marker-end: url(#arrow-teal); }
+      .weight-arrow { fill: none; stroke: #dc8b24; stroke-width: 2.4; marker-end: url(#arrow-orange); }
+      .divider { stroke: #d0d5dd; stroke-width: 1.5; stroke-dasharray: 5 7; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#667085"/>
+    </marker>
+    <marker id="arrow-teal" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2b9b81"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#dc8b24"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#101828" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="1700" height="980" fill="#fbfcfe"/>
+  <text x="850" y="48" text-anchor="middle" class="title">可靠性加权代价体模块（RWCV / SP-RWCV）</text>
+  <text x="850" y="77" text-anchor="middle" class="subtitle">每个级联阶段独立执行：单应性变换 → 源图评分 → 加权方差聚合 → 代价正则化</text>
+
+  <text x="48" y="125" class="section">① 多视图特征与几何对齐</text>
+  <line x1="38" y1="140" x2="1660" y2="140" class="divider"/>
+
+  <rect x="55" y="170" width="205" height="78" class="box input" filter="url(#shadow)"/>
+  <text x="158" y="202" text-anchor="middle" class="label">参考图特征</text>
+  <text x="158" y="230" text-anchor="middle" class="formula">F<tspan baseline-shift="sub">ref</tspan> ∈ ℝ<tspan baseline-shift="super">C×H×W</tspan></text>
+
+  <rect x="55" y="285" width="205" height="78" class="box input" filter="url(#shadow)"/>
+  <text x="158" y="317" text-anchor="middle" class="label">第 i 张源图特征</text>
+  <text x="158" y="345" text-anchor="middle" class="formula">F<tspan baseline-shift="sub">i</tspan>, i=1…N−1</text>
+
+  <rect x="330" y="285" width="230" height="78" class="box input" filter="url(#shadow)"/>
+  <text x="445" y="316" text-anchor="middle" class="label">Homography Warping</text>
+  <text x="445" y="344" text-anchor="middle" class="small">相机参数 + 深度假设 d</text>
+
+  <rect x="630" y="285" width="230" height="78" class="box input" filter="url(#shadow)"/>
+  <text x="745" y="316" text-anchor="middle" class="label">Warped Volume</text>
+  <text x="745" y="344" text-anchor="middle" class="formula">V<tspan baseline-shift="sub">i</tspan>(d) ∈ ℝ<tspan baseline-shift="super">C×D×H×W</tspan></text>
+
+  <path d="M260 324 L330 324" class="arrow"/>
+  <path d="M560 324 L630 324" class="arrow"/>
+  <path d="M158 248 L158 267 L445 267 L445 285" class="arrow"/>
+
+  <rect x="55" y="400" width="205" height="66" class="box reliability"/>
+  <text x="158" y="428" text-anchor="middle" class="label">RAFE 源图可靠性</text>
+  <text x="158" y="452" text-anchor="middle" class="formula">R<tspan baseline-shift="sub">i</tspan></text>
+
+  <rect x="330" y="400" width="230" height="66" class="box reliability"/>
+  <text x="445" y="428" text-anchor="middle" class="label">Reliability Warping</text>
+  <text x="445" y="452" text-anchor="middle" class="small">与源特征使用相同几何</text>
+
+  <rect x="630" y="400" width="230" height="66" class="box reliability"/>
+  <text x="745" y="428" text-anchor="middle" class="label">对齐后的源图可靠性</text>
+  <text x="745" y="452" text-anchor="middle" class="formula">R̃<tspan baseline-shift="sub">i</tspan></text>
+
+  <path d="M260 433 L330 433" class="rel-arrow"/>
+  <path d="M560 433 L630 433" class="rel-arrow"/>
+
+  <rect x="55" y="500" width="205" height="66" class="box reliability"/>
+  <text x="158" y="528" text-anchor="middle" class="label">RAFE 参考图可靠性</text>
+  <text x="158" y="552" text-anchor="middle" class="formula">R<tspan baseline-shift="sub">ref</tspan></text>
+
+  <text x="915" y="125" class="section">② 单次源图可靠性评分</text>
+
+  <rect x="925" y="170" width="285" height="196" class="box score" filter="url(#shadow)"/>
+  <text x="1068" y="201" text-anchor="middle" class="label">匹配统计构造</text>
+  <text x="950" y="236" class="small">• 参考特征 F<tspan baseline-shift="sub">ref</tspan></text>
+  <text x="950" y="264" class="small">• 深度维均值 mean<tspan baseline-shift="sub">d</tspan>(V<tspan baseline-shift="sub">i</tspan>)</text>
+  <text x="950" y="292" class="small">• 绝对差 |mean<tspan baseline-shift="sub">d</tspan>(V<tspan baseline-shift="sub">i</tspan>)−F<tspan baseline-shift="sub">ref</tspan>|</text>
+  <text x="950" y="320" class="small">• 最大相关性 max<tspan baseline-shift="sub">d</tspan> corr</text>
+  <text x="950" y="348" class="small">• 有效投影掩码</text>
+
+  <rect x="925" y="400" width="285" height="96" class="box reliability"/>
+  <text x="1068" y="431" text-anchor="middle" class="label">可靠性上下文</text>
+  <text x="1068" y="461" text-anchor="middle" class="formula">concat(R<tspan baseline-shift="sub">ref</tspan>, R̃<tspan baseline-shift="sub">i</tspan>)</text>
+  <text x="1068" y="484" text-anchor="middle" class="small">仅在启用 RAFE 时加入</text>
+
+  <rect x="1270" y="220" width="215" height="116" class="box score" filter="url(#shadow)"/>
+  <text x="1378" y="250" text-anchor="middle" class="label">ScoreNet</text>
+  <text x="1378" y="278" text-anchor="middle" class="small">1×1 Conv → BN → ReLU</text>
+  <text x="1378" y="302" text-anchor="middle" class="small">3×3 Conv → BN → ReLU</text>
+  <text x="1378" y="326" text-anchor="middle" class="small">1×1 Conv → raw score s<tspan baseline-shift="sub">i</tspan></text>
+
+  <rect x="1270" y="380" width="215" height="92" class="box score"/>
+  <text x="1378" y="411" text-anchor="middle" class="label">受限残差权重</text>
+  <text x="1378" y="440" text-anchor="middle" class="formula">ρ<tspan baseline-shift="sub">i</tspan>=tanh(s<tspan baseline-shift="sub">i</tspan>/T)</text>
+  <text x="1378" y="463" text-anchor="middle" class="small">乘上一阶段置信度门控</text>
+
+  <rect x="1520" y="380" width="140" height="92" class="box score" filter="url(#shadow)"/>
+  <text x="1590" y="411" text-anchor="middle" class="label">源图权重</text>
+  <text x="1590" y="442" text-anchor="middle" class="formula">w<tspan baseline-shift="sub">i</tspan>=1+αρ<tspan baseline-shift="sub">i</tspan></text>
+  <text x="1590" y="464" text-anchor="middle" class="small">限制在 [0.25, 2]</text>
+
+  <path d="M860 324 L895 324 L895 268 L925 268" class="arrow"/>
+  <path d="M860 433 L925 433" class="rel-arrow"/>
+  <path d="M260 533 L895 533 L895 463 L925 463" class="rel-arrow"/>
+  <path d="M1210 268 L1270 268" class="arrow"/>
+  <path d="M1210 448 L1238 448 L1238 314 L1270 314" class="rel-arrow"/>
+  <path d="M1378 336 L1378 380" class="weight-arrow"/>
+  <path d="M1485 426 L1520 426" class="weight-arrow"/>
+
+  <rect x="1270" y="505" width="390" height="70" class="box disabled"/>
+  <text x="1465" y="532" text-anchor="middle" class="label" fill="#b42318">解耦模式移除的重复门控</text>
+  <text x="1465" y="558" text-anchor="middle" class="formula" fill="#b42318">ρ<tspan baseline-shift="sub">i</tspan> ← ρ<tspan baseline-shift="sub">i</tspan> × R̃<tspan baseline-shift="sub">i</tspan>　✕</text>
+
+  <text x="48" y="625" class="section">③ 可靠性加权方差代价体</text>
+  <line x1="38" y1="640" x2="1660" y2="640" class="divider"/>
+
+  <rect x="55" y="680" width="250" height="142" class="box aggregate" filter="url(#shadow)"/>
+  <text x="180" y="714" text-anchor="middle" class="label">加权一阶矩</text>
+  <text x="180" y="757" text-anchor="middle" class="formula">μ =</text>
+  <text x="180" y="786" text-anchor="middle" class="formula">F<tspan baseline-shift="sub">ref</tspan> + Σ<tspan baseline-shift="sub">i</tspan> w<tspan baseline-shift="sub">i</tspan>V<tspan baseline-shift="sub">i</tspan></text>
+  <line x1="105" y1="795" x2="255" y2="795" stroke="#172033" stroke-width="1.5"/>
+  <text x="180" y="816" text-anchor="middle" class="formula">1 + Σ<tspan baseline-shift="sub">i</tspan> w<tspan baseline-shift="sub">i</tspan></text>
+
+  <rect x="365" y="680" width="310" height="142" class="box aggregate" filter="url(#shadow)"/>
+  <text x="520" y="714" text-anchor="middle" class="label">加权二阶矩与方差</text>
+  <text x="520" y="755" text-anchor="middle" class="formula">C<tspan baseline-shift="sub">RWCV</tspan> =</text>
+  <text x="490" y="784" text-anchor="middle" class="formula">F<tspan baseline-shift="sub">ref</tspan>² + Σ<tspan baseline-shift="sub">i</tspan> w<tspan baseline-shift="sub">i</tspan>V<tspan baseline-shift="sub">i</tspan>²</text>
+  <line x1="410" y1="794" x2="570" y2="794" stroke="#172033" stroke-width="1.5"/>
+  <text x="490" y="816" text-anchor="middle" class="formula">1 + Σ<tspan baseline-shift="sub">i</tspan> w<tspan baseline-shift="sub">i</tspan></text>
+  <text x="620" y="800" text-anchor="middle" class="formula">− μ²</text>
+
+  <rect x="745" y="700" width="215" height="102" class="box aggregate" filter="url(#shadow)"/>
+  <text x="853" y="737" text-anchor="middle" class="label">3D CostRegNet</text>
+  <text x="853" y="767" text-anchor="middle" class="small">正则化加权方差代价体</text>
+
+  <rect x="1030" y="700" width="215" height="102" class="box output" filter="url(#shadow)"/>
+  <text x="1138" y="737" text-anchor="middle" class="label">Softmax</text>
+  <text x="1138" y="767" text-anchor="middle" class="small">概率体 P(d)</text>
+
+  <rect x="1315" y="680" width="345" height="142" class="box output" filter="url(#shadow)"/>
+  <text x="1488" y="714" text-anchor="middle" class="label">阶段输出</text>
+  <text x="1345" y="752" class="small">• 深度回归 D<tspan baseline-shift="sub">s</tspan></text>
+  <text x="1345" y="780" class="small">• 光度置信度 P<tspan baseline-shift="sub">conf</tspan></text>
+  <text x="1345" y="808" class="small">• 源视角权重图 {w<tspan baseline-shift="sub">i</tspan>}</text>
+
+  <path d="M305 751 L365 751" class="arrow"/>
+  <path d="M675 751 L745 751" class="arrow"/>
+  <path d="M960 751 L1030 751" class="arrow"/>
+  <path d="M1245 751 L1315 751" class="arrow"/>
+  <path d="M745 363 L745 610 L180 610 L180 680" class="arrow"/>
+  <path d="M1590 472 L1590 620 L520 620 L520 680" class="weight-arrow"/>
+  <path d="M260 209 L295 209 L295 660 L180 660 L180 680" class="arrow"/>
+
+  <rect x="55" y="870" width="1605" height="72" rx="16" ry="16" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <circle cx="90" cy="906" r="8" fill="#2b9b81"/>
+  <text x="108" y="912" class="small">可靠性信息流</text>
+  <circle cx="270" cy="906" r="8" fill="#dc8b24"/>
+  <text x="288" y="912" class="small">源图评分与权重</text>
+  <circle cx="480" cy="906" r="8" fill="#7b61c9"/>
+  <text x="498" y="912" class="small">加权代价体</text>
+  <text x="720" y="912" class="small">核心思想：先对每个源视角进行像素级评分，再用权重构造单次方差代价体，避免重复 Homography Warping。</text>
+</svg>

@@ -13,21 +13,21 @@ from datasets.data_io import read_pfm, save_pfm
 import signal
 
 SHARED_ROOT = os.environ.get("R2MVSNET_SHARED_ROOT", "/root/shared-nvme")
-DTU_TEST_ROOT = os.environ.get(
-    "R2MVSNET_DTU_TEST_PATH",
-    os.path.join(SHARED_ROOT, "datasets", "dtu_testing"),
+ETH3D_TEST_ROOT = os.environ.get(
+    "R2MVSNET_ETH3D_TEST_PATH",
+    os.path.join(SHARED_ROOT, "datasets", "eth3d"),
 )
 
 parser = argparse.ArgumentParser(
-    description='Filter depth maps and fuse point cloud with NORMAL method, independently.')
-parser.add_argument('--conf', type=float, default=0.8, help='Photometric confidence threshold.')
+    description='ETH3D depth filtering and candidate-aware point cloud fusion.')
+parser.add_argument('--conf', type=float, default=0.1, help='Photometric confidence threshold.')
 parser.add_argument('--conf_stage', type=float, default=0.99,
                     help='High confidence threshold to keep original depth without averaging.')
-parser.add_argument('--s_view', type=int, default=3, help='Start of consistent view count for dynamic check.')
+parser.add_argument('--s_view', type=int, default=1, help='Start of consistent view count for dynamic check.')
 parser.add_argument('--e_view', type=int, default=11, help='End of consistent view count for dynamic check.')
 parser.add_argument('--dist_base', type=float, default=0.25,
                     help='Base unit for pixel distance threshold. Final threshold is i * dist_base.')
-parser.add_argument('--diff_base', type=float, default=0.001,
+parser.add_argument('--diff_base', type=float, default=1 / 1300,
                     help='Base unit for depth difference threshold. Final threshold is log(i) * diff_base.')
 parser.add_argument('--use_fgdr_candidates', action='store_true',
                     help='enable conservative FGDR near/far candidate selection before fusion')
@@ -36,15 +36,15 @@ parser.add_argument('--fgdr_candidate_gate_threshold', type=float, default=0.5,
 parser.add_argument('--fgdr_candidate_min_support_gain', type=int, default=1,
                     help='minimum additional consistent source views required to replace main depth')
 
-parser.add_argument('--outdir', default='./outputs',
+parser.add_argument('--outdir', default='./outputs_eth3d',
                     help='Directory where scan folders with depth/confidence are located.')
-parser.add_argument('--testpath', default=DTU_TEST_ROOT,
+parser.add_argument('--testpath', default=ETH3D_TEST_ROOT,
                     help='Original testing data dir (for camera and pair files).')
 parser.add_argument('--testpath_single_scene', help='testing data path for single scene')
-parser.add_argument('--testlist', default='lists/dtu/test.txt', help='List of scans to process.')
-parser.add_argument('--num_worker', type=int, default=4,
+parser.add_argument('--testlist', default='lists/eth3d/test.txt', help='List of scans to process.')
+parser.add_argument('--num_worker', type=int, default=2,
                     help='Number of workers for scenes multiprocessing (Watch out for CUDA OOM!).')
-parser.add_argument('--ndepths', type=str, default="32,16,8,8", help='ndepths')
+parser.add_argument('--ndepths', type=str, default="48,32,8", help='ndepths')
 parser.add_argument('--filter_method', type=str, default='normal', choices=["gipuma", "normal"], help="filter method")
 parser.add_argument('--display', action='store_true', help='display depth images and masks')
 
@@ -161,7 +161,8 @@ def batch_reproject_gpu(depth_ref, intrinsics_ref, extrinsics_ref, depths_src, i
 def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t,
                                  args, device):
     num_sources, height, width = src_depths_t.shape
-    effective_s_view = min(args.s_view, max(0, num_sources - 1))
+    effective_s_view = max(1, min(args.s_view, num_sources))
+    effective_e_view = max(effective_s_view + 1, num_sources)
 
     depth_reproj, x2d, y2d = batch_reproject_gpu(
         depth_candidate, ref_in_t, ref_ex_t, src_depths_t, src_ins_t, src_exs_t, device)
@@ -179,7 +180,7 @@ def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths
         depth_candidate.unsqueeze(0).abs() + 1e-6)
 
     geo_mask_sums = []
-    for consistent_views in range(effective_s_view, num_sources):
+    for consistent_views in range(effective_s_view, effective_e_view):
         depth_threshold = math.log(max(consistent_views, 1.05), 10) * args.diff_base
         consistency = (
             (dist < consistent_views * args.dist_base) &
@@ -189,10 +190,10 @@ def evaluate_depth_candidate_gpu(depth_candidate, ref_in_t, ref_ex_t, src_depths
 
     geo_mask = geo_mask_sums[-1] >= num_sources
     for support_sum, consistent_views in zip(
-            geo_mask_sums, range(effective_s_view, num_sources)):
+            geo_mask_sums, range(effective_s_view, effective_e_view)):
         geo_mask = geo_mask | (support_sum >= consistent_views)
 
-    broad_level = num_sources - 1
+    broad_level = max(1, num_sources - 1)
     broad_mask = (
         (dist < broad_level * args.dist_base) &
         (depth_diff < math.log(max(broad_level, 1.05), 10) * args.diff_base)
