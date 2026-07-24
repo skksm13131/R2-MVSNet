@@ -46,7 +46,6 @@ FeatureNet -> cascade depth sampling -> homography warping -> variance cost volu
 
 ```bash
 --use_view_attention
---view_attention_mode single_pass_reliability_weighted
 --use_rafe
 --use_adaptive_r2
 ```

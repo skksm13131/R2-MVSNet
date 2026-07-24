@@ -23,40 +23,32 @@ module.py
 │   ├── ConvBnReLU3D
 │   └── ConvBn3D
 │
-├── 3. 注意力辅助模块
-│   ├── ChannelAttention
-│   ├── SpatialAttention
-│   └── AttentionGuidedCostVolumeFusion
-│
-├── 4. 跨尺度特征增强模块
-│   └── CrossScaleAttentionBlock
-│
-├── 5. 基础网络结构模块
+├── 3. 基础网络结构模块
 │   ├── BasicBlock
 │   └── Hourglass3d
 │
-├── 6. 单应性变换 / 特征投影
+├── 4. 单应性变换 / 特征投影
 │   └── homo_warping()
 │
-├── 7. 2D 上采样融合模块
+├── 5. 2D 上采样融合模块
 │   └── DeConv2dFuse
 │
-├── 8. RAFE 可靠性感知特征模块
+├── 6. RAFE 可靠性感知特征模块
 │   └── ReliabilityAwareFeatureAdapter
 │
-├── 9. 特征提取主网络
+├── 7. 特征提取主网络
 │   └── FeatureNet
 │
-├── 10. 代价体正则化网络
+├── 8. 代价体正则化网络
 │   └── CostRegNet
 │
-├── 11. 深度图细化网络
+├── 9. 深度图细化网络
 │   └── RefineNet
 │
-├── 12. FGDR 候选深度细化模块
+├── 10. FGDR 候选深度细化模块
 │   └── FusionGuidedDepthRefinement
 │
-└── 13. 深度采样、深度回归和损失函数
+└── 11. 深度采样、深度回归和损失函数
     ├── depth_regression()
     ├── cas_mvsnet_loss()
     ├── get_cur_depth_range_samples()
@@ -296,342 +288,6 @@ class ConvBn3D(nn.Module):
 
     def forward(self, x):
         return self.bn(self.conv(x))
-
-
-class ChannelAttention(nn.Module):
-    """全局通道注意力 - 通过全局池化增强通道响应"""
-    def __init__(self, channels, reduction=4):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Conv2d(channels, channels // reduction, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels // reduction, channels, 1, bias=False)
-        )
-
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        return torch.sigmoid(avg_out + max_out)
-
-
-class SpatialAttention(nn.Module):
-    """CBAM空间注意力模块 - 增强重要空间位置的响应"""
-    def __init__(self, kernel_size=7):
-        super().__init__()
-        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        concat = torch.cat([avg_out, max_out], dim=1)
-        return torch.sigmoid(self.conv(concat))
-
-
-class AttentionGuidedCostVolumeFusion(nn.Module):
-    """注意力引导的代价体融合模块 (Attention-guided Cost Volume Fusion, ACVF)
-
-    核心设计思想：
-    1. 深度维度注意力 (Depth-wise Attention): 识别最相关的深度假设
-    2. 视图维度注意力 (View-wise Attention): 学习不同视图的贡献权重
-    3. 空间引导注意力 (Spatial-guided Attention): 利用参考图像语义信息指导融合
-
-    作用位置：在构建 variance cost volume 之前，对各视图特征进行加权融合
-    """
-
-    def __init__(self, feature_channels, num_views, reduction=4):
-        super().__init__()
-        self.num_views = num_views
-        self.feat_channels = feature_channels
-
-        # ── 视图注意力：学习每个视图的重要性 ──
-        # 对每个视图分别计算注意力权重
-        self.view_attention = nn.Sequential(
-            nn.Conv2d(feature_channels, feature_channels // reduction, 1, bias=False),
-            nn.BatchNorm2d(feature_channels // reduction),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(feature_channels // reduction, 1, 1, bias=False),
-        )
-
-        # ── 深度维度注意力：识别关键深度层 ──
-        # 在构建 cost volume 时，对深度维度加权
-        self.depth_attention = nn.Sequential(
-            nn.Conv3d(feature_channels, feature_channels // reduction, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(feature_channels // reduction),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(feature_channels // reduction, 1, kernel_size=3, padding=1, bias=False),
-        )
-
-        # ── 空间引导注意力：利用参考图像的边缘/纹理信息 ──
-        # 从参考图像提取语义引导信息
-        self.spatial_guide = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1, bias=False),  # 输入参考图像
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, kernel_size=1, bias=False),
-        )
-
-        # ── 特征变换层：增强特征表达 ──
-        self.feature_transform = nn.Sequential(
-            nn.Conv2d(feature_channels, feature_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(feature_channels),
-            nn.ReLU(inplace=True),
-        )
-
-        # ── 融合调制层：动态调整融合强度 ──
-        self.fusion_modulator = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(feature_channels, feature_channels // 4, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(feature_channels // 4, 1, 1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, ref_feature, src_features, ref_img=None):
-        """
-        Args:
-            ref_feature: 参考视图特征 [B, C, H, W]
-            src_features: 源视图特征列表 [[B, C, H, W], ...]
-            ref_img: 参考图像 [B, 3, H, W] (可选，用于空间引导)
-
-        Returns:
-            enhanced_features: 增强后的特征列表
-            attention_weights: 各视图的注意力权重 [B, N, H, W]
-        """
-        all_features = [ref_feature] + src_features
-        num_views = len(all_features)
-        B, C, H, W = ref_feature.shape
-
-        # ── Step 1: 视图注意力 - 学习每个视图的重要性 ──
-        view_weights = []
-        transformed_features = []
-        for i, feat in enumerate(all_features):
-            # 计算视图重要性
-            w = self.view_attention(feat)  # [B, 1, H, W]
-            view_weights.append(w)
-
-            # 特征变换
-            transformed_feat = self.feature_transform(feat)
-            transformed_features.append(transformed_feat)
-
-        # 归一化视图权重 (softmax)
-        view_weights = torch.stack(view_weights, dim=1)  # [B, N, H, W]
-        view_weights_softmax = F.softmax(view_weights, dim=1)
-
-        # ── Step 2: 空间引导注意力 (如果提供了参考图像) ──
-        spatial_guide_weight = None
-        if ref_img is not None:
-            spatial_guide_weight = self.spatial_guide(ref_img)  # [B, 1, H_img, W_img]
-            spatial_guide_weight = torch.sigmoid(spatial_guide_weight)
-            # 插值到特征分辨率，使空间引导与特征尺度匹配
-            spatial_guide_weight = F.interpolate(
-                spatial_guide_weight, size=(H, W), mode='bilinear', align_corners=False
-            )
-
-        # Step 3: feature reweighting
-        raw_weights = []
-        for i, transformed_feat in enumerate(transformed_features):
-            w = view_weights_softmax[:, i]  # [B, 1, H, W]
-
-            if spatial_guide_weight is not None:
-                w = w * (1.0 + 0.5 * spatial_guide_weight)
-
-            modulator = self.fusion_modulator(transformed_feat)  # [B, 1, 1, 1]
-            raw_weights.append(w * modulator)
-
-        fused_weights = torch.stack(raw_weights, dim=1)  # [B, N, 1, H, W]
-        fused_weights = fused_weights / (fused_weights.sum(dim=1, keepdim=True) + 1e-8)
-
-        enhanced_features = []
-        for i, transformed_feat in enumerate(transformed_features):
-            enhanced_feat = transformed_feat * fused_weights[:, i]
-            enhanced_features.append(enhanced_feat)
-
-        return enhanced_features, fused_weights[:, :, 0], spatial_guide_weight
-
-    def compute_attention_cost_volume(self, enhanced_features, proj_matrices, depth_values, ref_proj):
-        """
-        使用注意力加权构建增强的 cost volume
-
-        Args:
-            enhanced_features: 注意力增强后的特征列表
-            proj_matrices: 投影矩阵列表
-            depth_values: 深度假设值 [B, D]
-            ref_proj: 参考视图投影矩阵
-
-        Returns:
-            attn_cost_volume: 增强后的代价体 [B, C, D, H, W]
-            depth_attn_weights: 深度注意力权重 [B, 1, D, H, W]
-        """
-        ref_feature = enhanced_features[0]
-        B, C, H, W = ref_feature.shape
-        D = depth_values.shape[1]
-
-        # 构建参考体
-        ref_volume = ref_feature.unsqueeze(2).repeat(1, 1, D, 1, 1)  # [B, C, D, H, W]
-        volume_sum = ref_volume
-        volume_sq_sum = ref_volume ** 2
-
-        # 对每个源视图进行 warping 和加权融合
-        for idx in range(1, len(enhanced_features)):
-            src_feat = enhanced_features[idx]
-            src_proj = proj_matrices[idx]
-
-            # 计算投影变换
-            src_proj_new = src_proj[:, 0].clone()
-            src_proj_new[:, :3, :4] = torch.matmul(src_proj[:, 1, :3, :3], src_proj[:, 0, :3, :4])
-            ref_proj_new = ref_proj[:, 0].clone()
-            ref_proj_new[:, :3, :4] = torch.matmul(ref_proj[:, 1, :3, :3], ref_proj[:, 0, :3, :4])
-
-            # 变形
-            warped_volume = homo_warping(src_feat, src_proj_new, ref_proj_new, depth_values)
-
-            # 累积
-            volume_sum = volume_sum + warped_volume
-            volume_sq_sum = volume_sq_sum + warped_volume ** 2
-
-        # ── 深度注意力加权 ──
-        # 计算初始 variance cost volume
-        num_views = len(enhanced_features)
-        cost_volume = volume_sq_sum.div_(num_views).sub_(volume_sum.div_(num_views).pow_(2))
-
-        # 应用深度注意力
-        depth_attn = self.depth_attention(cost_volume)  # [B, 1, D, H, W]
-        depth_attn_weights = torch.sigmoid(depth_attn)
-
-        # 注意力加权的 cost volume
-        attn_cost_volume = cost_volume * depth_attn_weights
-
-        return attn_cost_volume, depth_attn_weights
-
-
-class CrossScaleAttentionBlock(nn.Module):
-    """跨尺度注意力模块 v2 - 渐进式门控融合多尺度特征
-
-    改进点：
-    1. 无过压缩：保持各尺度通道数，通过 1x1 卷积自适应融合
-    2. 渐进式融合：从小尺度(粗粒度)向大尺度(细粒度)逐步注入跨尺度信息
-    3. 门控机制：学习跨尺度信息的重要性，避免干扰原始特征
-    4. 位置编码：保留空间对应关系
-    5. 残差稳定：所有分支都有 skip connection
-
-    输入: features_dict = {"stage1": feat1, "stage2": feat2, "stage3": feat3}
-    输出: 增强后的 features_dict
-    """
-    def __init__(self, feat_channels, reduction=2):
-        super().__init__()
-        self.feat_channels = feat_channels  # [32, 16, 8]
-        self.reduction = reduction
-
-        # 小容量信息提取层 (各尺度独立)
-        # 使用 reduction=2 避免过度压缩
-        proj_channels = [ch // reduction for ch in feat_channels]
-        self.proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(ch, proj_ch, 1, bias=False),
-                nn.BatchNorm2d(proj_ch),
-                nn.ReLU(inplace=True)
-            ) for ch, proj_ch in zip(feat_channels, proj_channels)
-        ])
-
-        # 跨尺度融合层 (双向：从粗到细 + 从细到粗)
-        # stage3(小) → stage2(中)
-        self.fuse_3to2 = nn.Sequential(
-            nn.Conv2d(proj_channels[2] + proj_channels[1], proj_channels[1], 3, padding=1, bias=False),
-            nn.BatchNorm2d(proj_channels[1]),
-            nn.ReLU(inplace=True),
-        )
-        # stage2 + stage3 → stage1(大)
-        self.fuse_2to1 = nn.Sequential(
-            nn.Conv2d(proj_channels[1] + proj_channels[0], proj_channels[0], 3, padding=1, bias=False),
-            nn.BatchNorm2d(proj_channels[0]),
-            nn.ReLU(inplace=True),
-        )
-        # stage1 → stage2 (反向引导)
-        self.fuse_1to2 = nn.Sequential(
-            nn.Conv2d(proj_channels[0] + proj_channels[1], proj_channels[1], 3, padding=1, bias=False),
-            nn.BatchNorm2d(proj_channels[1]),
-            nn.ReLU(inplace=True),
-        )
-        # stage1 + stage2 → stage3 (反向引导)
-        self.fuse_1to3 = nn.Sequential(
-            nn.Conv2d(proj_channels[0] + proj_channels[2], proj_channels[2], 3, padding=1, bias=False),
-            nn.BatchNorm2d(proj_channels[2]),
-            nn.ReLU(inplace=True),
-        )
-
-        # 门控层 (控制跨尺度信息的重要程度)
-        self.gate_3to2 = nn.Sequential(
-            nn.Conv2d(proj_channels[2] + proj_channels[1], 1, 1, bias=False),
-            nn.Sigmoid()
-        )
-        self.gate_2to1 = nn.Sequential(
-            nn.Conv2d(proj_channels[1] + proj_channels[0], 1, 1, bias=False),
-            nn.Sigmoid()
-        )
-        self.gate_1to2 = nn.Sequential(
-            nn.Conv2d(proj_channels[0] + proj_channels[1], 1, 1, bias=False),
-            nn.Sigmoid()
-        )
-        self.gate_1to3 = nn.Sequential(
-            nn.Conv2d(proj_channels[0] + proj_channels[2], 1, 1, bias=False),
-            nn.Sigmoid()
-        )
-
-        # 输出投影层
-        self.out_proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(proj_ch, ch, 1, bias=False),
-                nn.BatchNorm2d(ch)
-            ) for ch, proj_ch in zip(feat_channels, proj_channels)
-        ])
-
-        # Conservative residual gating keeps the branch close to baseline early in training.
-        self.stage_residual_logits = nn.Parameter(torch.full((len(feat_channels),), -2.0))
-
-    def _upsample_cat(self, small_feat, big_feat):
-        upsampled = F.interpolate(small_feat, size=big_feat.shape[2:], mode='bilinear', align_corners=False)
-        return torch.cat([upsampled, big_feat], dim=1)
-
-    def forward(self, features_dict):
-        feats = [features_dict[f"stage{i+1}"] for i in range(len(self.feat_channels))]
-        proj_feats = [self.proj[i](feats[i]) for i in range(len(feats))]
-
-        # 前向路径：stage3 → stage2 → stage1（粗到细，补充大范围上下文）
-        fuse_3to2_input = self._upsample_cat(proj_feats[2], proj_feats[1])
-        cross_2_from_3 = self.fuse_3to2(fuse_3to2_input)
-        gate_3to2 = self.gate_3to2(fuse_3to2_input)
-        proj_feats[1] = proj_feats[1] + gate_3to2 * cross_2_from_3
-
-        fuse_2to1_input = self._upsample_cat(proj_feats[1], proj_feats[0])
-        cross_1_from_2 = self.fuse_2to1(fuse_2to1_input)
-        gate_2to1 = self.gate_2to1(fuse_2to1_input)
-        proj_feats[0] = proj_feats[0] + gate_2to1 * cross_1_from_2
-
-        # 反向路径：stage1 → stage2 → stage3（细到粗，补充细节信息）
-        proj_0_down = F.interpolate(proj_feats[0], size=feats[1].shape[2:], mode='bilinear', align_corners=False)
-        fuse_1to2_input = torch.cat([proj_0_down, proj_feats[1]], dim=1)
-        cross_2_from_1 = self.fuse_1to2(fuse_1to2_input)
-        gate_1to2 = self.gate_1to2(fuse_1to2_input)
-        proj_feats[1] = proj_feats[1] + gate_1to2 * cross_2_from_1
-
-        proj_0_down2 = F.interpolate(proj_feats[0], size=feats[2].shape[2:], mode='bilinear', align_corners=False)
-        fuse_1to3_input = torch.cat([proj_0_down2, proj_feats[2]], dim=1)
-        cross_3_from_1 = self.fuse_1to3(fuse_1to3_input)
-        gate_1to3 = self.gate_1to3(fuse_1to3_input)
-        proj_feats[2] = proj_feats[2] + gate_1to3 * cross_3_from_1
-
-        outputs = {}
-        residual_scales = torch.sigmoid(self.stage_residual_logits)
-        for i in range(len(proj_feats)):
-            enhanced = self.out_proj[i](proj_feats[i])
-            outputs[f"stage{i+1}"] = feats[i] + residual_scales[i] * enhanced
-
-        return outputs
 
 
 class BasicBlock(nn.Module):

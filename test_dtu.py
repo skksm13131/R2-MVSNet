@@ -52,9 +52,6 @@ parser.add_argument('--depth_inter_r', type=str, default="4,2,1", help='depth_in
 parser.add_argument('--cr_base_chs', type=str, default="8,8,8", help='cost regularization base channels')
 parser.add_argument('--grad_method', type=str, default="detach", choices=["detach", "undetach"], help='grad method')
 parser.add_argument('--use_view_attention', action='store_true', help='enable SP-RWCV source-view reliability weighting')
-parser.add_argument('--view_attention_mode', type=str, default='single_pass_reliability_weighted',
-                    choices=['single_pass_reliability_weighted'],
-                    help='SP-RWCV weighting variant')
 parser.add_argument('--use_rafe', action='store_true', help='enable reliability-aware feature extraction')
 parser.add_argument('--use_fgdr', action='store_true', help='enable progressive fusion-guided depth refinement')
 parser.add_argument('--fgdr_max_radius_factor', type=float, default=2.0, help='maximum FGDR candidate radius in local depth intervals')
@@ -127,7 +124,6 @@ def save_scene_depth(testlist):
                           cr_base_chs=[int(ch) for ch in args.cr_base_chs.split(",") if ch],
                           grad_method=args.grad_method,
                           use_view_attention=args.use_view_attention,
-                          view_attention_mode=args.view_attention_mode,
                           use_rafe=args.use_rafe,
                           use_fgdr=args.use_fgdr,
                           fgdr_max_radius_factor=args.fgdr_max_radius_factor,

@@ -148,7 +148,6 @@ def main():
             use_view_attention=cfg['use_view_attention'],
             use_fgdr=cfg['use_fgdr'],
             fgdr_anchor_base=cfg['use_fgdr'],
-            view_attention_mode='single_pass_reliability_weighted',
             fgdr_max_radius_factor=2.0,
         )
 

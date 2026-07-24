@@ -61,7 +61,7 @@ ssh -p 23466 root@10.91.28.4
 ```text
 train tag: 20260628_r2_anchor_fgdr_rafe_sprwcv_bs4_e16
 checkpoint dir: checkpoints/20260628_r2_anchor_fgdr_rafe_sprwcv_bs4_e16
-flags: --use_rafe --use_view_attention --view_attention_mode single_pass_reliability_weighted --use_fgdr --fgdr_anchor_base
+flags: --use_rafe --use_view_attention --use_fgdr --fgdr_anchor_base
 batch_size: 4
 epochs: 16
 status: completed, final checkpoint model_000015.ckpt
@@ -77,6 +77,16 @@ local:    Acc=0.312612, Comp=0.249581, Overall=0.281097
 official: Acc=0.333268, Comp=0.267471, Overall=0.300370
 official eval dir: /root/official_eval_20260630_r2_anchor_fgdr_candidate_fusion_m015_001_w8
 ```
+
+2026-07-24 保存了另一批点云的完整 22-scan 官方复评结果：
+
+```text
+latest official: Acc=0.327053, Comp=0.261178, Overall=0.294116
+csv: docs/results/dtu_official_latest.csv
+```
+
+该结果来自独立重建批次，不与上面的 `20260630` 服务器输出 tag 混用。仓库只保存逐场景
+CSV，不提交 checkpoint、深度图、PFM、点云或完整评估目录。
 
 相对 RAFE + SP-RWCV，官方 Overall 改善 `0.005500`，Accuracy 和 Completeness 同时改善。该 checkpoint 是当前完整模型，后续实验和消融均以它对应的模块定义为准。
 
@@ -143,7 +153,6 @@ bash scripts/train_baseline.sh <tag> \
   --pin_m \
   --use_rafe \
   --use_view_attention \
-  --view_attention_mode single_pass_reliability_weighted
 ```
 
 Adaptive R2 训练模板：
@@ -156,7 +165,6 @@ bash scripts/train_baseline.sh <tag> \
   --use_rafe \
   --use_adaptive_r2 \
   --use_view_attention \
-  --view_attention_mode single_pass_reliability_weighted
 ```
 
 ## 常用测试与评估命令
@@ -172,7 +180,6 @@ R2 测试参数：
 ```bash
 --use_rafe \
 --use_view_attention \
---view_attention_mode single_pass_reliability_weighted
 ```
 
 Adaptive R2 额外参数：

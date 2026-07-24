@@ -27,6 +27,19 @@ RAFE + SP-RWCV + Anchor-FGDR candidate fusion
 
 原始实验 CSV 放在 [docs/data](docs/data)。
 
+## 最新评估
+
+最新 22-scan DTU 官方复评结果：
+
+```text
+Accuracy     0.327053
+Completeness 0.261178
+Overall      0.294116
+```
+
+逐场景结果见 [docs/results/dtu_official_latest.csv](docs/results/dtu_official_latest.csv)。
+仓库只记录指标，不提交对应 checkpoint、深度图、PFM、点云或完整评估工作目录。
+
 ## 常用入口
 
 训练完整模型：
@@ -38,7 +51,6 @@ python train.py \
   --pin_m \
   --use_rafe \
   --use_view_attention \
-  --view_attention_mode single_pass_reliability_weighted \
   --use_fgdr \
   --fgdr_anchor_base
 ```
@@ -51,7 +63,6 @@ python test.py \
   --outdir outputs_retest/<tag> \
   --use_rafe \
   --use_view_attention \
-  --view_attention_mode single_pass_reliability_weighted \
   --use_fgdr \
   --fgdr_anchor_base
 ```

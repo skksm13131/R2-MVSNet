@@ -59,8 +59,6 @@ parser.add_argument('--grad_method', type=str, default="detach", choices=["detac
 
 # R2 modules
 parser.add_argument('--use_view_attention', action='store_true', help='enable SP-RWCV')
-parser.add_argument('--view_attention_mode', type=str, default='single_pass_reliability_weighted',
-                    choices=['single_pass_reliability_weighted'])
 parser.add_argument('--use_rafe', action='store_true', help='enable RAFE')
 parser.add_argument('--use_fgdr', action='store_true', help='enable FGDR')
 parser.add_argument('--fgdr_max_radius_factor', type=float, default=2.0)
@@ -353,7 +351,6 @@ if __name__ == '__main__':
         grad_method=args.grad_method,
         use_rafe=args.use_rafe,
         use_view_attention=args.use_view_attention,
-        view_attention_mode=args.view_attention_mode,
         use_fgdr=args.use_fgdr,
         fgdr_anchor_base=args.fgdr_anchor_base,
         fgdr_max_radius_factor=args.fgdr_max_radius_factor,

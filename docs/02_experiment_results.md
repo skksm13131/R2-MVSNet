@@ -4,6 +4,18 @@ DTU 的 Accuracy、Completeness、Overall 都是距离误差，越低越好。
 
 论文或正式汇报优先使用官方 MATLAB 评估。本地 `matlab.py` 结果只作为快速观察和 sanity check。
 
+## 最新 22-scan 官方复评
+
+最新保存的 DTU 官方复评结果如下，距离误差均为越低越好：
+
+| 方法 | 结果记录 | Acc Mean | Comp Mean | Overall |
+| --- | --- | ---: | ---: | ---: |
+| R2-MVSNet Full（最新重建） | [`dtu_official_latest.csv`](results/dtu_official_latest.csv) | **0.327053** | **0.261178** | **0.294116** |
+
+该 CSV 包含完整 22 个 DTU scan。对应点云来自独立重建批次，因此保留下面
+`20260630_r2_anchor_fgdr_candidate_fusion_m015_001` 的服务器历史结果，不将两批点云混为同一输出。
+模型、深度图、PFM、点云和完整评估工作目录均不提交到仓库。
+
 ## 官方 MATLAB 主消融
 
 | 方法 | 输出 tag | Acc Mean | Comp Mean | Overall |
